@@ -1,0 +1,47 @@
+/* Polaris owns typography, surfaces, controls, and spacing. */
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  min-width: 320px;
+}
+s-query-container,
+s-stack,
+s-grid,
+s-box {
+  min-width: 0;
+}
+.ma-hero-illustration {
+  width: min(100%, 420px);
+  height: auto;
+}
+.products-product-cell__thumbnail img {
+  display: block;
+  width: 40px;
+  height: 40px;
+  object-fit: cover;
+}
+.products-product-cell {
+  flex-wrap: nowrap;
+}
+.products-product-cell__title {
+  overflow-wrap: anywhere;
+}
+.mh-nowrap {
+  white-space: nowrap;
+}
+.pb-dialog__table-scroll {
+  overflow-x: auto;
+}
+.mh-detail-list {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+}
+.mh-detail-list dd {
+  overflow-wrap: anywhere;
+}
+
+.products-table-shell--compact s-table-cell {
+  padding-block: 4px;
+}

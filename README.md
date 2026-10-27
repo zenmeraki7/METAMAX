@@ -1,5 +1,105 @@
 # Shopify App Template for Node
 
+Webhook persistence, recovery workers, API resource controls, and privacy cleanup
+are documented in [Reconciliation operations](docs/reconciliation-operations.md).
+
+## Cloudflare R2 object storage
+
+The backend has private object storage helpers in `web/storage.js`, using the
+S3-compatible SDK with Standard storage. Enable R2 in your Cloudflare account,
+create a private Standard bucket named `newmeta`, and create an R2 API token with
+Object Read & Write permissions scoped to that bucket. Save its Access Key ID
+and Secret Access Key in the ignored `web/.env` file:
+
+```dotenv
+R2_ACCOUNT_ID=your-cloudflare-account-id
+R2_ACCESS_KEY_ID=your-r2-access-key-id
+R2_SECRET_ACCESS_KEY=your-r2-secret-access-key
+R2_BUCKET=newmeta
+```
+
+Use `R2_ENDPOINT` only if a jurisdiction-specific endpoint is needed. Run
+`npm run storage:check` from the project root to verify bucket access and a
+temporary object's upload/download/delete cycle. The check removes its own object.
+Backend code can import `uploadObject`, `downloadObject`, `deleteObject`, and
+`signedDownloadUrl` from `web/storage.js`. Signed download URLs expire after
+15 minutes by default. Call `closeStorage` during shutdown.
+
+Keep credentials on the server. No public bucket access or browser upload
+endpoint is enabled by this integration. In production, configure these variables
+in the server environment.
+
+R2 Standard's monthly free allowance is 10 GB-month of storage, 1 million Class A
+operations, and 10 million Class B operations. Usage beyond that is billed;
+the free allowance is not a hard spending cap. See
+[Cloudflare R2 pricing](https://developers.cloudflare.com/r2/pricing/).
+
+## Redis and BullMQ
+
+Start Docker Desktop, then run `npm run redis:up` from the project root.
+This starts Redis on `127.0.0.1:6379`, with a persistent Docker volume,
+append-only persistence, and the `noeviction` policy required by BullMQ.
+Set `REDIS_URL=redis://127.0.0.1:6379` in `web/.env` (already configured locally).
+Run `npm run queue:check` to enqueue and process a temporary job, then clean it up.
+Use `npm run redis:stop` to stop Redis while keeping its data.
+
+If Docker Desktop is stuck starting and its engine returns HTTP 500, stop it
+with `docker desktop stop --force --timeout 30`. Wait for the Docker Desktop
+processes to exit, then run `wsl --terminate docker-desktop`. If
+`wsl --list --verbose` also lists `docker-desktop-data`, terminate that
+distribution too. Start Docker Desktop again, then run `npm run redis:up`
+and `npm run queue:check` to verify Redis and an actual BullMQ job. These
+steps keep the existing containers and persistent volumes.
+
+Import `createQueue` and `createWorker` from `web/queues.js` in backend code:
+
+```js
+import { createQueue, createWorker } from "./queues.js";
+
+const queue = createQueue("jobs");
+const worker = createWorker("jobs", async (job) => {
+  // Perform the background task here.
+  return { processed: job.id };
+});
+worker.on("error", (error) => console.error(error));
+await queue.add("example", { example: true });
+// On shutdown: await worker.close(); await queue.close();
+```
+
+Queue and worker factories use a `newmeta` prefix. The worker retries Redis
+connections indefinitely; producers have a bounded per-command retry count.
+Initial catalogue imports are reserved automatically when a merchant installs
+the app and dispatched immediately after the offline session commits. Keep the
+worker running alongside the HTTP app; its scanner recovers interrupted or
+unavailable queue dispatches. For an app running in another
+Docker Desktop container, use `redis://host.docker.internal:6379`; for a service
+on this Compose network, use `redis://redis:6379`. Set `REDIS_URL` separately in
+your production environment.
+
+## Database
+
+Shared configuration lives in `web/shared/env.js`, which loads `web/.env`
+without overriding deployment or Shopify CLI environment variables.
+`readEnvironment()` validates `DATABASE_URL`, optional `DIRECT_URL`, and
+`REDIS_URL`; errors identify variable names without disclosing their values.
+Callers can disable a required service using `{ requireDatabase: false }` or
+`{ requireRedis: false }` as the second argument. The shared database module
+re-exports the existing Prisma instance and lifecycle helpers. The shared Redis
+module provides producer and worker connection options, with `web/queues.js`
+preserving its existing public exports. Keep credentials in the environment,
+never in these shared source files.
+
+This project uses the Neon PostgreSQL database `newmeta` for Shopify sessions.
+The local connection string is in `web/.env` (ignored by Git). For another checkout,
+copy `web/.env.example` to `web/.env` and supply the connection string. In production,
+set `DATABASE_URL` in the server environment; it takes precedence over the local file.
+Use the pooled Neon connection URL with TLS enabled. The Shopify PostgreSQL adapter
+creates and migrates its session table automatically on startup.
+
+Install backend dependencies with `npm --prefix web install`, then start development
+with `npm run dev` from the project root. Existing local SQLite sessions are not copied;
+previously installed shops may need to authenticate again.
+
 This is a template for building a [Shopify app](https://shopify.dev/docs/apps/getting-started) using Node and React. It contains the basics for building a Shopify app.
 
 Rather than cloning this repo, you can use your preferred package manager and the Shopify CLI with [these steps](#installing-the-template).

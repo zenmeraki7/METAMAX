@@ -1,6 +1,7 @@
 # Environment Configuration
 .env
 .env.*
+!.env.example
 
 # Dependency directory
 node_modules
@@ -30,3 +31,12 @@ web/database.sqlite
 # Ignore shopify files created during app dev
 .shopify/*
 .shopify.lock
+
+# Local tooling and verification artifacts
+.wrangler/
+.push-latest-staging/
+*.zip
+*.tmp.js
+web/live-catalog-verification.json
+web/scope-release-approval.png
+web/scope-update-released.png

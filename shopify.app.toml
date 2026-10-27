@@ -1,20 +1,41 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
-client_id = "deac399342968b0b07e7f1defb7c7fd7"
-name = "metamax"
+client_id = "f21082724c64c7ebdf0bb2c4172db2b0"
 application_url = "https://shopify.dev/apps/default-app-home"
 embedded = true
+name = "Metav3"
 
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-scopes = ""
+scopes = "read_products,read_inventory,read_locations"
 
 [auth]
 redirect_urls = [ "https://shopify.dev/apps/default-app-home/api/auth" ]
 
 [webhooks]
-api_version = "2027-01"
+api_version = "2026-10"
+
+[[webhooks.subscriptions]]
+topics = ["products/create", "products/update"]
+uri = "/api/webhooks/catalog"
+include_fields = ["id", "updated_at"]
+
+[[webhooks.subscriptions]]
+topics = ["products/delete"]
+uri = "/api/webhooks/catalog"
+include_fields = ["id"]
+
+[[webhooks.subscriptions]]
+topics = ["app/uninstalled"]
+uri = "/webhooks/lifecycle"
+
+[[webhooks.subscriptions]]
+topics = ["inventory_levels/update", "inventory_levels/connect", "inventory_levels/disconnect", "inventory_items/create", "inventory_items/update", "inventory_items/delete"]
+uri = "/api/webhooks/inventory"
+
+[[webhooks.subscriptions]]
+compliance_topics = ["customers/data_request", "customers/redact", "shop/redact"]
+uri = "/webhooks/lifecycle"
 
 [build]
-include_config_on_deploy = true
 automatically_update_urls_on_dev = true

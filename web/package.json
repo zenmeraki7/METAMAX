@@ -6,22 +6,50 @@
   "scripts": {
     "debug": "node --inspect-brk index.js",
     "dev": "cross-env NODE_ENV=development nodemon index.js --ignore ./frontend",
-    "serve": "cross-env NODE_ENV=production node index.js"
+    "serve": "cross-env NODE_ENV=production node index.js",
+    "worker:sync": "node workers/sync.worker.js",
+    "worker:reconcile": "node workers/reconcile.worker.js",
+    "worker": "node workers/run.js",
+    "catalog:snapshot": "node scripts/catalog-snapshot.js",
+    "registrations:repair": "node scripts/repair-registrations.js",
+    "db:generate": "prisma generate",
+    "db:migrate": "node scripts/migrate.js",
+    "test": "node scripts/test-integration.js",
+    "test:integration": "node scripts/test-integration.js",
+    "test:products": "node --test tests/products.test.js",
+    "test:fields": "node --test tests/fields/*.test.js",
+    "test:query": "node --test tests/query/*.test.js",
+    "test:bulk-query": "node --test tests/bulk-query-coordinator.test.js",
+    "test:mirror-foundation": "node scripts/test-mirror-foundation.js",
+    "fields:check": "node scripts/check-fields.js",
+    "fields:example": "node examples/fields.js",
+    "storage:check": "node scripts/check-storage.js",
+    "queue:check": "node scripts/check-queue.js"
   },
   "type": "module",
   "engines": {
-    "node": ">=16.13.0"
+    "node": ">=20.19.0"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1156.0",
+    "@aws-sdk/s3-request-presigner": "^3.1156.0",
+    "@prisma/adapter-pg": "^7.10.1",
+    "@prisma/client": "^7.10.1",
     "@shopify/shopify-app-express": "^5.0.8",
-    "@shopify/shopify-app-session-storage-sqlite": "^4.0.8",
+    "@shopify/shopify-app-session-storage-postgresql": "^4.0.20",
+    "bullmq": "^5.81.5",
     "compression": "^1.7.4",
     "cross-env": "^7.0.3",
+    "dotenv": "^16.6.1",
+    "ioredis": "^6.0.0",
+    "json-bigint": "^1.0.0",
+    "pg": "^8.23.1",
     "serve-static": "^1.14.1"
   },
   "devDependencies": {
     "nodemon": "^2.0.15",
     "prettier": "^2.6.2",
-    "pretty-quick": "^3.1.3"
+    "pretty-quick": "^3.1.3",
+    "prisma": "^7.10.1"
   }
 }
