@@ -105,6 +105,11 @@ test('observation receipt changes update evidence binding but preserve the captu
   rejects(() => snapshot({ observation: { ...observation(),source: 'SHOPIFY_GRAPHQL' } }), 'HISTORY_EVIDENCE_CONFLICT');
   for (const observedAt of ['2026-02-30T00:00:00.000Z','2026-10-30T00:00:00Z','2026-10-30T01:00:00.000+01:00']) rejects(() => snapshot({ observation: { ...observation(),observedAt } }));
 });
+test('Shopify AFTER observations retain pinned execution coordinates while BEFORE provenance stays strict',()=>{
+ const after=snapshot({kind:'OBSERVED_AFTER',observation:{...observation(),source:'SHOPIFY_GRAPHQL'}});
+ assert.equal(after.binding.mode,'MIRROR_PINNED');assert.equal(after.observation.source,'SHOPIFY_GRAPHQL');
+ rejects(()=>snapshot({observation:{...observation(),source:'SHOPIFY_GRAPHQL'}}),'HISTORY_EVIDENCE_CONFLICT');
+});
 test('snapshot/intent consistency rejects changed values, stale digests and tampered observation links', () => {
   const before = snapshot(), mutation = intent(before);
   assert.equal(contract.assertSnapshotIntentConsistency({ beforeSnapshot: before,intent: mutation }), true);

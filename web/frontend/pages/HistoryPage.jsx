@@ -7,12 +7,14 @@ import HistoryDetailDialog from "../components/history/HistoryDetailDialog.jsx";
 import useHistoryFilters from "../hooks/useHistoryFilters.js";
 import useHistoryPagination from "../hooks/useHistoryPagination.js";
 import useHistorySelection from "../hooks/useHistorySelection.js";
+import useHistoryOperations from "../hooks/useHistoryOperations.js";
 import useShopifyToast from "../hooks/useShopifyToast.js";
 import { demoHistory } from "../data/history.demo.js";
 import { downloadHistoryCsv } from "../utils/historyCsv.js";
 import { routes } from "../config/routes.js";
 export default function HistoryPage() {
-  const filters = useHistoryFilters(demoHistory);
+  const { operations, isLive, loading, refetch } = useHistoryOperations();
+  const filters = useHistoryFilters(operations);
   const pagination = useHistoryPagination(filters.filtered);
   const selection = useHistorySelection(pagination.pageRecords);
   const { notify } = useShopifyToast();
@@ -33,18 +35,22 @@ export default function HistoryPage() {
     }
   };
   const handleRetry = (operation) => {
-    notify(`Demo mode: ${operation.title} was not retried.`);
+    notify(isLive ? `Retrying ${operation.title}...` : `Demo mode: ${operation.title} was not retried.`);
   };
   const handleExport = () => {
     downloadHistoryCsv(filters.filtered);
-    notify("Demo history CSV downloaded.");
+    notify(isLive ? "Filtered history CSV downloaded." : "Demo history CSV downloaded.");
   };
   const handleHelp = () => {
     helpDialogRef.current?.showOverlay();
   };
   return (
     <s-page heading="History">
-      <s-banner tone="info">This history contains example operations.</s-banner>
+      {isLive ? (
+        <s-banner tone="success">Connected to live operation history.</s-banner>
+      ) : (
+        <s-banner tone="info">This history contains example operations. Run a bulk edit to see live entries.</s-banner>
+      )}
       <s-button slot="primary-action" variant="primary" href={routes.bulkEdit}>
         New edit
       </s-button>

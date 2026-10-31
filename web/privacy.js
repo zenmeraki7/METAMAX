@@ -187,6 +187,24 @@ export async function handleWebhookEvent({
   const productIds = await extractProductIds(normalizedTopic, payload, database, shop);
   const deleted = normalizedTopic.includes("DELETE");
 
+  if (database && normalizedTopic === "BULK_OPERATIONS_FINISH" && payload?.admin_graphql_api_id) {
+    try {
+      await database.query(
+        `UPDATE mirror.sync_external_operations
+         SET remote_status = $3, object_count = COALESCE($4, object_count), updated_at = now()
+         WHERE shop_id = $1 AND operation_id = $2`,
+        [
+          shop,
+          payload.admin_graphql_api_id,
+          payload.status || "COMPLETED",
+          payload.object_count ? BigInt(payload.object_count) : null,
+        ],
+      );
+    } catch {
+      // Non-fatal; background polling will also verify remote status
+    }
+  }
+
   if (productIds.length > 0) {
     // Persist verified event identity and mutation journal for each affected product
     for (const productId of productIds) {
@@ -266,5 +284,6 @@ export function createWebhookHandlers(sessionStorageOrOptions, maybeOptions = {}
     INVENTORY_ITEMS_CREATE: makeHandler("INVENTORY_ITEMS_CREATE"),
     INVENTORY_ITEMS_UPDATE: makeHandler("INVENTORY_ITEMS_UPDATE"),
     INVENTORY_ITEMS_DELETE: makeHandler("INVENTORY_ITEMS_DELETE"),
+    BULK_OPERATIONS_FINISH: makeHandler("BULK_OPERATIONS_FINISH"),
   };
 }

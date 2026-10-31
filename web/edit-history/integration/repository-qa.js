@@ -5,7 +5,7 @@ import { createHistoryExecutionAdapter } from '../../services/history-execution-
 import { getApprovedContractInTransaction } from '../../services/approval.server.js';
 import { normalizeHistorySnapshot,historyFingerprint } from '../history-contract.js';
 const base=f=>({authContext:f.input.authContext,operationId:f.input.operationId,mutationId:f.input.mutationId,attemptId:f.plan.attemptId});
-async function evidence(f,kind,override={}){
+export async function evidence(f,kind,override={}){
  const evidenceId=randomUUID();
  const record={...Object.fromEntries(['operationId','mutationId','attemptId','executionJobId','executionItemId','executionFenceEpoch','executionClaimId'].map(key=>[key,
   ({operationId:f.input.operationId,mutationId:f.input.mutationId,attemptId:f.plan.attemptId,executionJobId:f.command,executionItemId:f.item,executionFenceEpoch:f.plan.fenceEpoch,executionClaimId:f.plan.executionClaimId})[key]])),kind,evidenceId,

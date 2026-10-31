@@ -11,6 +11,19 @@ export function catalogCount(value) {
   return count;
 }
 
+const summaryCache = new Map();
+const MAX_SUMMARY_CACHE_ENTRIES = 500;
+
+export function clearCatalogSummaryCache(shopId = null) {
+  if (shopId) {
+    for (const key of summaryCache.keys()) {
+      if (key.startsWith(`${shopId}:`)) summaryCache.delete(key);
+    }
+  } else {
+    summaryCache.clear();
+  }
+}
+
 export async function readCatalogPage(
   client,
   { shopId, generationId, productIds },
@@ -35,19 +48,29 @@ export async function readCatalogPage(
       C.CONTRACT_MISMATCH,
       "Catalog projection lost selected rows",
     );
-  const summary = (
-    await client.query(
-      `SELECT
-    (SELECT count(*)::text FROM mirror.products WHERE shop_id=$1 AND generation_id=$2 AND deleted_at IS NULL) AS "productCount",
-    (SELECT count(*)::text FROM mirror.products WHERE shop_id=$1 AND generation_id=$2 AND deleted_at IS NULL AND status='ACTIVE') AS "activeCount",
-    (SELECT count(*)::text FROM mirror.variants WHERE shop_id=$1 AND generation_id=$2 AND deleted_at IS NULL) AS "variantCount"`,
-      [shopId, generationId],
-    )
-  ).rows[0];
+  const cacheKey = `${shopId}:${generationId}`;
+  let summary = summaryCache.get(cacheKey);
+  if (!summary) {
+    const row = (
+      await client.query(
+        `SELECT
+      (SELECT count(*)::text FROM mirror.products WHERE shop_id=$1 AND generation_id=$2 AND deleted_at IS NULL) AS "productCount",
+      (SELECT count(*)::text FROM mirror.products WHERE shop_id=$1 AND generation_id=$2 AND deleted_at IS NULL AND status='ACTIVE') AS "activeCount",
+      (SELECT count(*)::text FROM mirror.variants WHERE shop_id=$1 AND generation_id=$2 AND deleted_at IS NULL) AS "variantCount"`,
+        [shopId, generationId],
+      )
+    ).rows[0];
+    summary = Object.fromEntries(
+      Object.entries(row).map(([key, value]) => [key, catalogCount(value)]),
+    );
+    if (summaryCache.size >= MAX_SUMMARY_CACHE_ENTRIES) {
+      const oldestKey = summaryCache.keys().next().value;
+      if (oldestKey) summaryCache.delete(oldestKey);
+    }
+    summaryCache.set(cacheKey, summary);
+  }
   return {
     products,
-    summary: Object.fromEntries(
-      Object.entries(summary).map(([key, value]) => [key, catalogCount(value)]),
-    ),
+    summary,
   };
 }

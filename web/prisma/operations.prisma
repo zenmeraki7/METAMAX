@@ -15,6 +15,7 @@ enum WorkStatus {
 model JobCommand {
   id                BigInt              @id @default(autoincrement())
   shopId            String              @map("shop_id") @db.Text
+  installationVersion String?            @map("installation_version") @db.Text
   contractId        String              @map("contract_id") @db.Text
   idempotencyKey    String              @map("idempotency_key") @db.Text
   kind              String              @db.Text

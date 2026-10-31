@@ -10,6 +10,7 @@ import { createCatalogImportService } from "./services/catalog-import.server.js"
 import { createCatalogPhaseRuntime } from "./services/catalog-phase-runtime.server.js";
 import {createExportRuntime,exportProductionConfig} from "./export/export-runtime.server.js";
 import { createHistorySecurityRuntime } from './edit-history/history-security-runtime.server.js';
+import { createOperationSupervisor } from "./workers/operation-supervisor.server.js";
 
 const port = Number(process.env.BACKEND_PORT || process.env.PORT || 3000);
 if (!Number.isInteger(port) || port < 1 || port > 65535)
@@ -86,14 +87,17 @@ const server = createApp({
   port,
   () => console.log(`Shopify Express app listening on port ${port}`),
 );
+const operationSupervisor = database ? createOperationSupervisor({ database, logger: console }) : null;
 exportRuntime?.start();
 historySecurityRuntime?.start();
+operationSupervisor?.start();
 for (const signal of ["SIGINT", "SIGTERM"])
   process.once(signal, () => {
     server.close(async () => {
       await catalogImportService?.stop();
       await exportRuntime?.stop();
       await historySecurityRuntime?.stop();
+      await operationSupervisor?.stop();
       await Promise.all([closeRedis(), closeDatabase()]);
       process.exit(0);
     });

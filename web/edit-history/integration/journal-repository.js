@@ -10,6 +10,7 @@ import { testRepositoryAuthority } from './repository-authority.js';
 import pg from 'pg';
 import { createHistoryValueProtection } from '../history-value-protection.server.js';
 import { testHistorySecurity } from './security.js';
+import {testWorkerExecution} from './worker-execution.js';
 
 const digest = n => `sha256:${String(n).repeat(64)}`;
 const clone = value => JSON.parse(JSON.stringify(value));
@@ -39,11 +40,13 @@ export async function testJournalRepository(t, adminPool) {
     GRANT SELECT ON ALL TABLES IN SCHEMA history_test_authority TO metamax_history_runtime;
     GRANT UPDATE(_history_lock) ON history_test_authority.plans,history_test_authority.observations TO metamax_history_runtime;`);
   async function fixture(options = {}) {
-    const operationId = randomUUID(), mutationId = randomUUID(), installationId = randomUUID();
-    const shopId = `journal-${randomUUID()}.myshopify.com`, authContext = Object.freeze({ session: randomUUID() });
+    const operationId = randomUUID(), mutationId = randomUUID(), installationId = options.tenant?.installationId??randomUUID();
+    const shopId = options.tenant?.shopId??`journal-${randomUUID()}.myshopify.com`, authContext = Object.freeze({ session: randomUUID() });
     const contractId = randomUUID(), generationId = randomUUID(), selectionId = randomUUID();
+    const kind=options.kind??'bulk_edit',inverse=kind==='undo';
+    const writes=inverse?{title:'Before',vendor:'Old Vendor'}:{title:'After',vendor:'Vendor'};
     const q = (text, values) => pool.query(text, values);
-    await q('INSERT INTO mirror.shops(id,installation_version) VALUES($1,$2)', [shopId,installationId]);
+    if(!options.tenant)await q('INSERT INTO mirror.shops(id,installation_version) VALUES($1,$2)', [shopId,installationId]);
     await q(`INSERT INTO mirror.generations(shop_id,id,coverage_revision,mirror_schema_version,source_contract_version,mapping_version,required_datasets)
       VALUES($1,$2,'coverage-1','mirror_v1','sources_v1','physical-mapping-1',ARRAY['products'])`, [shopId,generationId]);
     const resource = 'gid://shopify/Product/1';
@@ -61,39 +64,39 @@ export async function testJournalRepository(t, adminPool) {
     await q("UPDATE mirror.generations SET status='PUBLISHED',published_at=now() WHERE shop_id=$1 AND id=$2", [shopId,generationId]);
     await q(`INSERT INTO mirror.selection_snapshots(shop_id,id,generation_id,coverage_revision,mapping_version,operation,operation_id,
       filter_ast,filter_fingerprint,registry_version,definition_revisions,expires_at)
-      VALUES($1,$2,$3,'coverage-1','physical-mapping-1','bulk_edit',$4,'{}',$5,'registry-1','[]',now()+interval '2 hours')`,
-    [shopId,selectionId,generationId,operationId,digest(2).slice(7)]);
+      VALUES($1,$2,$3,'coverage-1','physical-mapping-1',$6,$4,'{}',$5,'registry-1','[]',now()+interval '2 hours')`,
+    [shopId,selectionId,generationId,operationId,digest(2).slice(7),kind]);
     await q(`INSERT INTO mirror.selection_items(shop_id,snapshot_id,generation_id,product_id) VALUES($1,$2,$3,$4)`, [shopId,selectionId,generationId,product]);
     await q("UPDATE mirror.selection_snapshots SET status='APPROVED',selected_count=1,selection_hash='hash',frozen_at=now() WHERE shop_id=$1 AND id=$2", [shopId,selectionId]);
-    const approvalContext = { shopId,snapshotId: selectionId,operation: 'bulk_edit',contract: { updates: { title: 'After',vendor: 'Vendor' } },selectionHash: 'hash',approvedBy: 'merchant' };
+    const approvalContext = { shopId,snapshotId: selectionId,operation:kind,contract:inverse?{sourceCommandId:options.sourceCommandId,fields:['title','vendor'],...(options.historyUndoBinding?{historyUndo:options.historyUndoBinding}:{})}:{updates:writes},selectionHash: 'hash',approvedBy: 'merchant' };
     const approvedHash = computeContractHash(approvalContext);
     await q(`INSERT INTO mirror.execution_contracts(shop_id,id,snapshot_id,operation,approval_revision,contract,contract_hash,hash_version,canonical_contract,expires_at)
-      VALUES($1,$2,$3,'bulk_edit','approval-1',$4,$5,'canonical-v2',$6,$7)`,
-    [shopId,contractId,selectionId,JSON.stringify(approvalContext.contract),approvedHash,canonicalApproval(approvalContext),new Date(Date.now()+(options.approvalLifetimeMs ?? 3600000))]);
+      VALUES($1,$2,$3,$8,'approval-1',$4,$5,'canonical-v2',$6,$7)`,
+    [shopId,contractId,selectionId,JSON.stringify(approvalContext.contract),approvedHash,canonicalApproval(approvalContext),new Date(Date.now()+(options.approvalLifetimeMs ?? 3600000)),kind]);
     await q("UPDATE mirror.execution_contracts SET status='APPROVED',approved_by='merchant',approved_at=now() WHERE shop_id=$1 AND id=$2", [shopId,contractId]);
-    const command = (await q(`INSERT INTO mirror.job_commands(shop_id,contract_id,idempotency_key,kind,status,fence,lease_token,lease_until,updated_at)
-      VALUES($1,$2,$3,'bulk_edit','RUNNING',9007199254740993,'secret-lease',now()+interval '1 hour',now()) RETURNING id`, [shopId,contractId,randomUUID()])).rows[0].id;
-    const edit = (await q('INSERT INTO mirror.edit_operations(shop_id,command_id,preview_id) VALUES($1,$2,$3) RETURNING id', [shopId,command,contractId])).rows[0].id;
-    const item = (await q(`INSERT INTO mirror.job_items(shop_id,command_id,resource_id,intended_values)
-      VALUES($1,$2,$3,'{"title":"After","vendor":"Vendor"}') RETURNING id`, [shopId,command,resource])).rows[0].id;
+    const command = options.deferCommand?'9223372036854775807':(await q(`INSERT INTO mirror.job_commands(shop_id,contract_id,idempotency_key,kind,status,fence,lease_token,lease_until,updated_at)
+      VALUES($1,$2,$3,$4,'RUNNING',9007199254740993,'secret-lease',now()+interval '1 hour',now()) RETURNING id`, [shopId,contractId,randomUUID(),kind])).rows[0].id;
+    const edit = options.deferCommand?'9223372036854775807':(await q('INSERT INTO mirror.edit_operations(shop_id,command_id,preview_id) VALUES($1,$2,$3) RETURNING id', [shopId,command,contractId])).rows[0].id;
+    const item = options.deferCommand?'9223372036854775807':(await q(`INSERT INTO mirror.job_items(shop_id,command_id,resource_id,intended_values)
+      VALUES($1,$2,$3,$4::jsonb) RETURNING id`, [shopId,command,resource,JSON.stringify(writes)])).rows[0].id;
     const attemptId = randomUUID(), startedAt = new Date().toISOString();
     const claim = { fenceEpoch: '9007199254740993', executionClaimId: 'engine-claim-1', leaseToken: 'secret-lease' };
     const entries = ['product.title','product.vendor'].map((fieldId, index) => {
       const identity = { shopId,installationId,executionJobId: command,executionItemId: item,mutationId,resourceGid: resource,fieldId };
       const binding = { mode: 'MIRROR_PINNED',executionFingerprint: digest(1),filterFingerprint: digest(2),fieldResolutionFingerprint: digest(3),
         fieldDefinitionRevision: 'registry-1',generationId,coverageRevision: 'coverage-1',mappingVersion: 'engine-mapping-1' };
-      const beforeSnapshot = normalizeHistorySnapshot({ identity,binding,kind: 'BEFORE',valueKind: 'VALUE',value: index ? 'Old Vendor' : 'Before',
+      const beforeSnapshot = normalizeHistorySnapshot({ identity,binding,kind: 'BEFORE',valueKind: 'VALUE',value: inverse?(index?'Vendor':'After'):(index ? 'Old Vendor' : 'Before'),
         observation: { observationId: randomUUID(),source: 'MIRROR_PINNED',observedAt: startedAt,resourceGid: resource,fieldId,
           sourceRevision: null,receiptId: randomUUID(),receiptFingerprint: digest(5) } });
       const intent = normalizeMutationIntent({ identity,binding,beforeSnapshotFingerprint: beforeSnapshot.fingerprint,
-        mutationPlanFingerprint: digest(6),intendedValueKind: 'VALUE',intendedValue: index ? 'Vendor' : 'After' });
+        mutationPlanFingerprint: digest(6),intendedValueKind: 'VALUE',intendedValue: writes[index?'vendor':'title'] });
       const attempt = normalizeMutationAttempt({ identity,attemptId,attemptNumber: 1,fenceEpoch: claim.fenceEpoch,executionClaimId: claim.executionClaimId,startedAt });
       return { beforeSnapshot,intent,attempt,resourceFamilyGid: resource };
     });
     const plan = { shopId,installationId,operationId,mutationId,executionJobId: command,editOperationId: edit,executionContractId: contractId,
-      operationKind: 'BULK_EDIT',executionFingerprint: digest(1),filterFingerprint: digest(2),fieldResolutionFingerprint: digest(3),
+      operationKind: inverse?'UNDO':'BULK_EDIT',executionFingerprint: digest(1),filterFingerprint: digest(2),fieldResolutionFingerprint: digest(3),
       targetingSnapshotId: selectionId,logicalOperationId: operationId,approvalRevision: 'approval-1',
-      itemIntendedValues: { title: 'After',vendor: 'Vendor' },
+      itemIntendedValues:writes,
       approvedContractFingerprint: `sha256:${approvedHash}`,mutationPlanFingerprint: digest(6),attemptId,attemptNumber: 1,
       fenceEpoch: claim.fenceEpoch,executionClaimId: claim.executionClaimId,startedAt,
       fields: entries.map(e => ({ identity: e.intent.identity,binding: e.intent.binding,intendedValueKind: e.intent.intendedValueKind,
@@ -453,6 +456,7 @@ export async function testJournalRepository(t, adminPool) {
   await testRepositoryQa(t,fixture,pool);
   await testExecutionAuthority(t,fixture,pool);
   await testRepositoryAuthority(t,fixture,pool);
+  await testWorkerExecution(t,fixture,pool);
   await testHistorySecurity(t,fixture,pool,adminPool);
   }finally{await runtimePool.end();}
 }

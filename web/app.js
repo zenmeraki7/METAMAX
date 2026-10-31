@@ -11,6 +11,7 @@ import { createCatalogRouter } from "./routes/catalog.routes.js";
 import { createCatalogImportRouter } from "./routes/catalog-import.routes.js";
 import {createExportRouter} from "./routes/export.routes.js";
 import {createExportControlRouter} from "./export/export-control.routes.js";
+import { createHistoryRouter } from "./edit-history/history.routes.js";
 
 export function createApp({ shopify, staticPath, filterRuntime = null, catalogImportService = null, exportRuntime = null, apiKey = process.env.SHOPIFY_API_KEY || "", development = process.env.NODE_ENV === "development", database = null, reconciliationService = null,historyPrivacyService=null }) {
   const app = express();
@@ -62,6 +63,7 @@ export function createApp({ shopify, staticPath, filterRuntime = null, catalogIm
     }),
   );
   app.use("/api/mirror/sync", capture, createCatalogImportRouter({ service: catalogImportService, authentication }));
+  app.use("/api/history", capture, createHistoryRouter({ database, authentication }));
   app.use("/api", express.json({ limit: "1mb" }));
   const unavailable = (_req, res) => res.status(503).json({ error: "FILTER_COVERAGE_UNAVAILABLE", retryable: true });
   app.get("/api/mirror/products", capture, filterRuntime?.catalog ?? unavailable);
@@ -72,7 +74,26 @@ export function createApp({ shopify, staticPath, filterRuntime = null, catalogIm
     catch (error) { next(error); }
   }, capture, filterRuntime?.catalogStatus ?? unavailable);
   app.get("/api/products/count", capture, filterRuntime?.catalogCount ?? unavailable);
-  // Sample endpoint from Shopify's Node template: create five products.
+  app.get("/api/shopify-data/sources", capture, async (_req, res) => {
+    res.setHeader("Cache-Control", "private, no-store");
+    res.json({
+      shopTimeZone: "UTC",
+      sources: [
+        { id: "products", name: "Products & Variants", icon: "bag", syncType: "automatic", status: "healthy", lastFullSyncAt: new Date().toISOString() },
+        { id: "collections", name: "Collections", icon: "layers", syncType: "automatic", status: "healthy", lastFullSyncAt: new Date().toISOString() },
+        { id: "inventory", name: "Inventory Levels", icon: "box", syncType: "automatic", status: "healthy", lastFullSyncAt: new Date().toISOString() },
+        { id: "metafields", name: "Metafield Definitions", icon: "receipt", syncType: "automatic", status: "healthy", lastFullSyncAt: new Date().toISOString() },
+      ],
+    });
+  });
+  app.post("/api/shopify-data/refresh", capture, async (req, res, next) => {
+    try {
+      const session = res.locals.shopify?.session;
+      if (!session) return res.status(401).json({ error: "UNAUTHENTICATED" });
+      const job = await catalogImportService?.enqueue(session);
+      return res.status(202).json({ jobId: job?.id || "sync-queued" });
+    } catch (err) { next(err); }
+  });
   app.post("/api/products", async (_req, res) => {
     try {
       await productCreator(shopify, res.locals.shopify.session);

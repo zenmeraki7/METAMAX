@@ -13,7 +13,7 @@ const match=(a,b,message)=>{if(!isDeepStrictEqual(comparable(a),comparable(b)))f
 const columns={
  shops:'id:text installation_version:text uninstalled_at:timestamptz?',
  publications:'shop_id:text generation_id:text coverage_revision:text mapping_version:text',
- job_commands:'id:int8 shop_id:text contract_id:text status:WorkStatus fence:int8 lease_token:text? lease_until:timestamptz? cancel_requested_at:timestamptz?',
+ job_commands:'id:int8 shop_id:text installation_version:text? contract_id:text status:WorkStatus fence:int8 lease_token:text? lease_until:timestamptz? cancel_requested_at:timestamptz?',
  edit_operations:'id:int8 shop_id:text command_id:int8 preview_id:text',
  job_items:'id:int8 shop_id:text command_id:int8 resource_id:text intended_values:jsonb status:WorkStatus',
  execution_contracts:'shop_id:text id:text snapshot_id:text operation:text approval_revision:text status:ApprovalStatus expires_at:timestamptz contract_hash:text contract:jsonb hash_version:text canonical_contract:text? approved_by:text? approved_at:timestamptz?',
@@ -80,6 +80,7 @@ export function createHistoryExecutionAdapter(){
   assertTenant,
   async lockAuthority({client:tx,tenant,plan,claim}){
         const command = (await tx.query(`SELECT * FROM mirror.job_commands WHERE shop_id=$1 AND id=$2 FOR UPDATE`, [tenant.shopId,plan.executionJobId])).rows[0];
+        if(command?.installation_version!==tenant.installationId)fail(C.OWNERSHIP_LOST,'Command belongs to a different installation');
         const assertClaim = async () => {
           const result = await tx.query(`SELECT c.id FROM mirror.job_commands c
             JOIN mirror.execution_contracts p ON p.shop_id=c.shop_id AND p.id=c.contract_id

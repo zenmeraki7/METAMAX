@@ -151,6 +151,20 @@ export function createHistoryLifecycle({database,executionAdapter,resolveTenant,
   return Object.freeze({operationId:c.operationId,mutationId:c.mutationId,attemptId:c.attemptId,state:target,observationIds:Object.freeze(observations)});
  }
  const api={
+  completeExecution:raw=>scope(raw,'complete_execution',[],async c=>{
+   await recoveryPermission(c,'complete_execution');
+   const engine=(await c.tx.query(`SELECT status FROM mirror.job_commands WHERE shop_id=$1 AND installation_version=$2 AND id=$3`,[c.tenant.shopId,c.tenant.installationId,c.op.execution_job_id])).rows[0];
+   if(!engine||!['SUCCEEDED','FAILED','CANCELLED'].includes(engine.status))return Object.freeze({completed:false});
+   if((await c.tx.query(`SELECT 1 FROM mirror.job_items WHERE shop_id=$1 AND command_id=$2 AND status IN('PENDING','RETRY','RUNNING') LIMIT 1`,[c.tenant.shopId,c.op.execution_job_id])).rows.length)return Object.freeze({completed:false});
+   const counts=(await c.tx.query(`SELECT count(*)::int AS total,count(*) FILTER(WHERE mutation_state='VERIFIED')::int AS verified,
+    count(*) FILTER(WHERE mutation_state NOT IN('VERIFIED','FAILED_NO_WRITE','CONFLICT'))::int AS unresolved
+    FROM edit_history.changes WHERE shop_id=$1 AND installation_id=$2 AND operation_id=$3`,c.params.slice(0,3))).rows[0];
+   if(!counts.total||counts.unresolved)return Object.freeze({completed:false});
+   const state=engine.status==='CANCELLED'?'CANCELLED':counts.verified===counts.total?'COMPLETED':counts.verified?'PARTIAL':'FAILED';
+   if(!['COMPLETED','PARTIAL','FAILED','CANCELLED'].includes(c.op.operation_state))await c.tx.query(`UPDATE edit_history.operations
+    SET operation_state=$4,completed_at=clock_timestamp(),updated_at=clock_timestamp() WHERE shop_id=$1 AND installation_id=$2 AND id=$3`,[...c.params.slice(0,3),state]);
+   return Object.freeze({completed:true,state});
+  }),
   async discoverOutcomeRecovery(raw){
    data(raw,['authContext','limit']);if(!raw.authContext)fail(C.UNAUTHORIZED,'Authenticated recovery context required');const limit=positive(raw.limit??25,100);
    const tx=await database.connect(),invoke=createHistoryHookInvoker(tx);let rows;

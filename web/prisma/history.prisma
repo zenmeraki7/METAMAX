@@ -1,0 +1,76 @@
+// METAMAX Edit History domain schema.
+// Models map directly to the immutable edit_history PostgreSQL tables.
+
+model HistoryOperation {
+  id                         String    @id @default(uuid()) @db.Uuid
+  shopId                     String    @map("shop_id") @db.Text
+  installationId             String    @map("installation_id") @db.Text
+  executionJobId             BigInt    @map("execution_job_id")
+  editOperationId            BigInt?   @map("edit_operation_id")
+  executionContractId        String?   @map("execution_contract_id") @db.Text
+  contractVersion            Int       @default(3) @map("contract_version")
+  fingerprintScheme          String    @default("metamax-history-sha256-v3") @map("fingerprint_scheme") @db.Text
+  operationKind              String    @map("operation_kind") @db.Text
+  operationState             String    @default("RECORDING") @map("operation_state") @db.Text
+  executionFingerprint       String    @map("execution_fingerprint") @db.Text
+  filterFingerprint          String?   @map("filter_fingerprint") @db.Text
+  approvedContractFingerprint String?  @map("approved_contract_fingerprint") @db.Text
+  fieldMappingVersion        String?   @map("field_mapping_version") @db.Text
+  actorType                  String    @default("SYSTEM") @map("actor_type") @db.Text
+  actorReference             String?   @map("actor_reference") @db.Text
+  changesRecorded            BigInt    @default(0) @map("changes_recorded")
+  changesVerified            BigInt    @default(0) @map("changes_verified")
+  changesFailed              BigInt    @default(0) @map("changes_failed")
+  changesUncertain           BigInt    @default(0) @map("changes_uncertain")
+  createdAt                  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt                  DateTime  @default(now()) @map("updated_at") @db.Timestamptz(3)
+  completedAt                DateTime? @map("completed_at") @db.Timestamptz(3)
+  retainedUntil              DateTime? @map("retained_until") @db.Timestamptz(3)
+  purgeRequestedAt           DateTime? @map("purge_requested_at") @db.Timestamptz(3)
+  legalHold                  Boolean   @default(false) @map("legal_hold")
+
+  @@index([shopId, createdAt])
+  @@index([shopId, executionJobId])
+  @@map("operations")
+  @@schema("edit_history")
+}
+
+model HistoryMutationRequest {
+  id                   String    @id @default(uuid()) @db.Uuid
+  shopId               String    @map("shop_id") @db.Text
+  installationId       String    @map("installation_id") @db.Text
+  operationId          String    @map("operation_id") @db.Uuid
+  executionItemId      BigInt    @map("execution_item_id")
+  mutationId           String    @map("mutation_id") @db.Uuid
+  attemptId            String    @map("attempt_id") @db.Uuid
+  attemptNumber        Int       @default(1) @map("attempt_number")
+  requestState         String    @default("PREPARED") @map("request_state") @db.Text
+  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt            DateTime  @default(now()) @map("updated_at") @db.Timestamptz(3)
+
+  @@unique([shopId, operationId, mutationId, attemptId])
+  @@index([shopId, operationId, executionItemId])
+  @@map("mutation_requests")
+  @@schema("edit_history")
+}
+
+model HistoryChange {
+  id                   String    @id @default(uuid()) @db.Uuid
+  shopId               String    @map("shop_id") @db.Text
+  installationId       String    @map("installation_id") @db.Text
+  operationId          String    @map("operation_id") @db.Uuid
+  executionItemId      BigInt    @map("execution_item_id")
+  mutationId           String    @map("mutation_id") @db.Uuid
+  attemptId            String    @map("attempt_id") @db.Uuid
+  attemptNumber        Int       @default(1) @map("attempt_number")
+  resourceGid          String    @map("resource_gid") @db.Text
+  fieldId              String    @map("field_id") @db.Text
+  mutationState        String    @default("PREPARED") @map("mutation_state") @db.Text
+  verificationState    String    @default("UNVERIFIED") @map("verification_state") @db.Text
+  preparedAt           DateTime  @default(now()) @map("prepared_at") @db.Timestamptz(3)
+
+  @@index([shopId, operationId, preparedAt])
+  @@index([shopId, resourceGid])
+  @@map("changes")
+  @@schema("edit_history")
+}

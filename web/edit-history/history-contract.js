@@ -965,7 +965,7 @@ export function normalizeHistorySnapshot(input) {
     EXECUTION_SNAPSHOT: "EXECUTION_SNAPSHOT",
   }[binding.mode];
 
-  if (observation.source !== expectedSource) {
+  if (observation.source !== expectedSource && !(kind === 'OBSERVED_AFTER' && observation.source === 'SHOPIFY_GRAPHQL')) {
     fail(
       CODES.EVIDENCE_CONFLICT,
       "Observation source does not match binding",

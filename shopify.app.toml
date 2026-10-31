@@ -2,10 +2,10 @@
 client_id = "f21082724c64c7ebdf0bb2c4172db2b0"
 application_url = "https://shopify.dev/apps/default-app-home"
 embedded = true
-name = "Metav3"
+name = "METAMAX"
 
 [access_scopes]
-scopes = "read_products,write_products,read_inventory"
+scopes = "read_products,write_products,read_inventory,write_inventory"
 
 [auth]
 redirect_urls = ["https://shopify.dev/apps/default-app-home/api/auth/callback"]
@@ -16,6 +16,7 @@ api_version = "2026-10"
 [[webhooks.subscriptions]]
 topics = [
   "app/uninstalled",
+  "bulk_operations/finish",
   "products/create",
   "products/update",
   "products/delete",

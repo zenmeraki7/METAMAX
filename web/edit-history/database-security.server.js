@@ -1,19 +1,20 @@
 /** Verify effective and SET ROLE-reachable privileges, never only role flags. */
 import { HistoryContractError,HISTORY_ERROR_CODES as C } from './history-contract.js';
 const tables=['operations','changes','snapshots','undo_requests','recovery_tasks','mutation_requests','privacy_scopes','purge_receipts'];
-const updates={operations:['operation_state','changes_recorded','changes_verified','changes_failed','changes_uncertain','completed_at','updated_at'],
+const updates={undo_requests:'undo_state preflight_fingerprint inverse_plan_fingerprint approval_reference approved_at execution_job_id execution_contract_id updated_at completed_at failure_code'.split(' '),
+ operations:['operation_state','changes_recorded','changes_verified','changes_failed','changes_uncertain','completed_at','updated_at'],
  changes:['mutation_state','verification_state','last_evidence_kind','last_evidence_fingerprint','dispatch_started_at','acknowledged_at','verified_at','updated_at'],
  mutation_requests:['request_state','dispatch_authorized_at','dispatch_evidence_fingerprint','outcome_evidence_kind','outcome_evidence_fingerprint',
  'acknowledged_at','verified_at','updated_at','dispatch_token_hash','dispatch_consumed_at'],
  recovery_tasks:['task_state','claimed_by','claim_token','claim_expires_at','fence_epoch','attempt_count','available_at','completed_at','updated_at','last_error_code','evidence_fingerprint','last_checked_at']};
 const insertOperations=['id','shop_id','installation_id','execution_job_id','edit_operation_id','execution_contract_id','operation_kind',
  'execution_fingerprint','filter_fingerprint','approved_contract_fingerprint','field_mapping_version'];
-const inserts={operations:insertOperations,
+const inserts={undo_requests:'id shop_id installation_id original_operation_id idempotency_key request_fingerprint conflict_policy handoff_key'.split(' '),operations:insertOperations,
  changes:'id shop_id installation_id operation_id execution_item_id mutation_id attempt_id attempt_number execution_fence_epoch execution_claim_id resource_gid resource_family_gid field_id field_definition_revision mutation_plan_fingerprint intended_value_fingerprint before_snapshot_fingerprint prepared_at'.split(' '),
  snapshots:'id shop_id installation_id operation_id change_id snapshot_kind value_kind value_json snapshot_fingerprint evidence_binding_fingerprint observation_id observation_source observed_at source_revision observation_receipt_id observation_receipt_fingerprint resource_gid field_id field_definition_revision filter_fingerprint execution_fingerprint field_resolution_fingerprint binding_mode generation_id coverage_revision mapping_version execution_snapshot_id mirror_before_snapshot_id value_encoding encrypted_value encryption_key_reference'.split(' '),
  recovery_tasks:'id shop_id installation_id operation_id change_id task_kind dedupe_key'.split(' '),
  mutation_requests:'id shop_id installation_id operation_id mutation_id attempt_id attempt_number execution_item_id execution_fence_epoch execution_claim_id mutation_plan_fingerprint request_fingerprint resource_field_set field_count request_state dispatch_handoff_key'.split(' ')};
-const reads={runtime:['operations','changes','snapshots','recovery_tasks','mutation_requests'],
+const reads={runtime:['operations','changes','snapshots','recovery_tasks','mutation_requests','undo_requests'],
  maintenance:['operations','changes','snapshots','privacy_scopes','purge_receipts'],privacy:[]};
 const functions={runtime:[],maintenance:['purge_history_batch','encrypt_legacy_snapshot','legacy_snapshot_batch','mark_encryption_review'],privacy:['request_shop_redaction']};
 const engineReads=['shops','job_commands','edit_operations','job_items','execution_contracts','selection_snapshots','generations',

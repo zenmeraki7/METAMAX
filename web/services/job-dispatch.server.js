@@ -4,6 +4,8 @@ import { FieldError, FIELD_ERROR_CODES as C } from "../fields/types.js";
 import { bulkInstructions, undoInstructions, assertIntendedValues, requireWriteAuthorization } from "./operation-instructions.server.js";
 
 const fail = (code, message) => { throw new FieldError(code, message); };
+const issuedDispatchers=new WeakSet();
+export function assertJobDispatchService(service){if(!issuedDispatchers.has(service))throw TypeError('Issued Bulk Edit dispatch service required');}
 
 export function createJobDispatchService({ database, approvalService, resolveShop, authorizeWrite } = {}) {
   if (typeof database?.connect !== "function" || typeof approvalService?.getApprovedContract !== "function" ||
@@ -114,5 +116,6 @@ export function createJobDispatchService({ database, approvalService, resolveSho
       throw error;
     } finally { if (owned) tx.release(); }
   }
-  return Object.freeze({ dispatchBulkEdit: options => dispatch("bulk_edit", options), dispatchUndo: options => dispatch("undo", options) });
+  const service=Object.freeze({ dispatchBulkEdit: options => dispatch("bulk_edit", options), dispatchUndo: options => dispatch("undo", options) });
+  issuedDispatchers.add(service);return service;
 }

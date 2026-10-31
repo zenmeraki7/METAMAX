@@ -478,6 +478,7 @@ test('Edit History V2 against isolated PostgreSQL', async t => {
     });
 
     await q(await readFile(new URL('20261030150000_history_security_retention/migration.sql',migrations),'utf8'));
+    await q(await readFile(new URL('20261030160000_history_undo_execution/migration.sql',migrations),'utf8'));
     await testJournalRepository(t, pool);
   } finally { await pool.end(); }
 });

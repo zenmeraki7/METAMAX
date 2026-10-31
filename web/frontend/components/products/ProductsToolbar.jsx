@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { productColumns } from "../../data/products.columns.js";
 import {
-  productFilterFields as fields,
+  installedFilterFields as fields,
   filterOperators,
   isPresenceOperator,
   filterOperand,

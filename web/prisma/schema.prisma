@@ -11,5 +11,5 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  schemas  = ["mirror", "export_engine"]
+  schemas  = ["mirror", "export_engine", "edit_history"]
 }

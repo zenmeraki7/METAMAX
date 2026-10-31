@@ -44,7 +44,9 @@ import {
 
 const fail = (code, message) => { throw new HistoryContractError(code, message); };
 const issuedRepositories=new WeakSet();
+const executionReadyRepositories=new WeakSet();
 export function assertHistoryRepository(repository){if(!issuedRepositories.has(repository))throw TypeError('Issued history repository required');}
+export function assertHistoryExecutionReady(repository){assertHistoryRepository(repository);if(!executionReadyRepositories.has(repository))throw TypeError('Journal dispatch, evidence and recovery providers required before execution');}
 // Contract canonicalization uses null-prototype records; database JSON and
 // individual normalizers can use ordinary records. Compare their data content.
 const comparable = value => Array.isArray(value) ? value.map(comparable) : value && typeof value === 'object'
@@ -378,12 +380,12 @@ export function createHistoryRepository({ database, resolveTenant, loadExecution
           // an uncertain request must be reconciled before another writer starts.
           for(const family of [...new Set(entries.map(e=>e.resourceFamilyGid))].sort()){
             const lock=await tx.query('SELECT pg_try_advisory_xact_lock(hashtextextended($1,0)) AS acquired',
-              [JSON.stringify([tenant.shopId,tenant.installationId,family])]);
+              [JSON.stringify([tenant.shopId,family])]);
             if(!lock.rows[0]?.acquired)fail(C.OWNERSHIP_LOST,'Resource family is being admitted by another execution');
           }
-          const competing=await tx.query(`SELECT id FROM edit_history.changes WHERE shop_id=$1 AND installation_id=$2
+          const competing=await tx.query(`SELECT 1 FROM edit_history.changes WHERE shop_id=$1
             AND resource_family_gid=ANY($3::text[]) AND mutation_state IN('DISPATCHING','OUTCOME_UNKNOWN','ACKNOWLEDGED')
-            AND NOT(operation_id=$4 AND mutation_id=$5 AND attempt_id=$6) LIMIT 1`,
+            AND NOT(installation_id=$2 AND operation_id=$4 AND mutation_id=$5 AND attempt_id=$6) LIMIT 1`,
             [tenant.shopId,tenant.installationId,[...new Set(entries.map(e=>e.resourceFamilyGid))],operationId,mutationId,plan.attemptId]);
           if(competing.rows.length)fail(C.INVALID_TRANSITION,'Resource family has an unresolved mutation; reconcile before writing');
           dispatchToken = randomBytes(32).toString('base64url');
@@ -512,7 +514,9 @@ export function createHistoryRepository({ database, resolveTenant, loadExecution
     prepareRequest: input => execute(input, false),beginDispatch: input => execute(input, true),
     getOperation: input => read(input,'read_operation'),getRequest: input => read(input,'read_request'),getSnapshot: input => read(input,'read_snapshot'),
   });
-  issuedRepositories.add(repository);return repository;
+  issuedRepositories.add(repository);
+  if([authorizeDispatch,loadMutationEvidence,verifyMutationEvidence,authorizeRecovery].every(fn=>typeof fn==='function'))executionReadyRepositories.add(repository);
+  return repository;
 }
 // Local integrity validation only; maintenance must independently authenticate
 // its database role and bind rows to the exact tenant before using it.
