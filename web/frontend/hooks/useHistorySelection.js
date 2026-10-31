@@ -1,34 +1,22 @@
-import {
-  useCallback,
-  useMemo,
-  useState,
-} from "react";
+import { useCallback, useMemo, useState } from "react";
 
-export default function useHistorySelection(
-  pageRecords
-) {
-  const [selectedIds, setSelectedIds] = useState(
-    () => new Set()
-  );
+export default function useHistorySelection(pageRecords) {
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
 
   const pageIds = useMemo(
     () => pageRecords.map((record) => record.id),
-    [pageRecords]
+    [pageRecords],
   );
 
-  const selectedOnPage = pageIds.filter(
-    (id) => selectedIds.has(id)
-  ).length;
+  const selectedOnPage = pageIds.filter((id) => selectedIds.has(id)).length;
 
-  const allSelected =
-    pageIds.length > 0 &&
-    selectedOnPage === pageIds.length;
+  const allSelected = pageIds.length > 0 && selectedOnPage === pageIds.length;
 
-  const indeterminate =
-    selectedOnPage > 0 && !allSelected;
+  const indeterminate = selectedOnPage > 0 && !allSelected;
 
   const selectOne = useCallback((id, checked) => {
     setSelectedIds((previous) => {
+      if (previous.has(id) === checked) return previous;
       const next = new Set(previous);
 
       if (checked) next.add(id);
@@ -51,11 +39,11 @@ export default function useHistorySelection(
         return next;
       });
     },
-    [pageIds]
+    [pageIds],
   );
 
   const clearSelection = useCallback(() => {
-    setSelectedIds(new Set());
+    setSelectedIds((previous) => (previous.size ? new Set() : previous));
   }, []);
 
   return {

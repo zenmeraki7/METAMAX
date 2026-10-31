@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 
-// React 18 does not bind custom-element lifecycle events through JSX props.
+// Native lifecycle listeners also support the event names used by CDN overlays.
 export default function useModalOverlay(modalRef, visible, onClose) {
   const closeCallback = useRef(onClose);
   const shown = useRef(false);

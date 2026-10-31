@@ -1,4 +1,3 @@
-import { useEffect, useRef } from "react";
 import AutomationCategories from "../components/automations/AutomationCategories.jsx";
 import AutomationNotice from "../components/automations/AutomationNotice.jsx";
 import AutomationTemplates from "../components/automations/AutomationTemplates.jsx";
@@ -9,31 +8,14 @@ import {
   getAutomationCounts,
 } from "../data/automations.demo.js";
 import { routes } from "../config/routes.js";
-import "../styles/automations.css";
 
 const demoCounts = getAutomationCounts(demoAutomations);
 
 export default function AutomationsPage() {
   const dashboard = useAutomationDashboard();
-  const pageRef = useRef(null);
-
-  useEffect(() => {
-    if (pageRef.current) {
-      pageRef.current.inlineSize = "large";
-      pageRef.current.setAttribute("inline-size", "large");
-      pageRef.current.setAttribute("inlinesize", "large");
-    }
-  }, []);
 
   return (
-    <s-page
-      ref={pageRef}
-      class="ma-page"
-      heading="Automations"
-      inlineSize="large"
-      inline-size="large"
-      inlinesize="large"
-    >
+    <s-page class="ma-page" heading="Automations" inlineSize="large">
       <s-link slot="breadcrumb-actions" href={routes.home}>
         Home
       </s-link>

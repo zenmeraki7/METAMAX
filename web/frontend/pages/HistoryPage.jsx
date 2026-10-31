@@ -11,7 +11,6 @@ import useShopifyToast from "../hooks/useShopifyToast.js";
 import { demoHistory } from "../data/history.demo.js";
 import { downloadHistoryCsv } from "../utils/historyCsv.js";
 import { routes } from "../config/routes.js";
-import "../styles/history.css";
 export default function HistoryPage() {
   const filters = useHistoryFilters(demoHistory);
   const pagination = useHistoryPagination(filters.filtered);
@@ -45,6 +44,7 @@ export default function HistoryPage() {
   };
   return (
     <s-page heading="History">
+      <s-banner tone="info">This history contains example operations.</s-banner>
       <s-button slot="primary-action" variant="primary" href={routes.bulkEdit}>
         New edit
       </s-button>

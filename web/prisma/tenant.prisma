@@ -1,0 +1,49 @@
+// METAMAX tenant domain. Loaded together through prisma.config.mjs.
+
+model Shop {
+  // Authenticated myshopify.com domain; adapters must not substitute browser IDs.
+  id                  String                   @id @db.Text
+  installedAt         DateTime                 @default(now()) @map("installed_at") @db.Timestamptz(3)
+  uninstalledAt       DateTime?                @map("uninstalled_at") @db.Timestamptz(3)
+  installationVersion String                   @default(uuid()) @map("installation_version") @db.Text
+  generations         MirrorGeneration[]
+  changes             CatalogChange[]
+  definitions         MetafieldDefinition[]
+  receipts            WebhookReceipt[]
+  auditEvents         AuditEvent[]
+  savedFilters        SavedFilter[]
+  schedules           JobSchedule[]
+  subscription        Subscription?
+  idempotency         IdempotencyRecord[]
+  catalogImports      CatalogImportJob[]
+  catalogExecutions   CatalogImportExecution[]
+  dispatchCursor      SyncDispatchShop?
+  dispatches          SyncDispatchDelivery[]
+  dispatchEvidence    SyncDispatchRecoveryEvidence[]
+  exportManifestJobs  ExportManifestJob[]
+  exportExecutions    ExportExecutionJob[]
+
+  @@unique([id, installationVersion])
+  @@map("shops")
+  @@schema("mirror")
+}
+
+// Current Shopify App Pricing observation for this installation. This cache
+// neither creates billing charges nor grants entitlement by itself.
+model Subscription {
+  shopId                 String    @id @map("shop_id") @db.Text
+  installationVersion    String    @map("installation_version") @db.Text
+  provider               String    @default("SHOPIFY_APP_PRICING") @db.Text
+  providerSubscriptionId String?   @map("provider_subscription_id") @db.Text
+  planHandle             String?   @map("plan_handle") @db.Text
+  status                 String    @default("UNVERIFIED") @db.Text
+  verificationRevision   BigInt    @default(0) @map("verification_revision")
+  verifiedAt             DateTime? @map("verified_at") @db.Timestamptz(3)
+  verificationExpiresAt  DateTime? @map("verification_expires_at") @db.Timestamptz(3)
+  updatedAt              DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+  merchant               Shop      @relation(fields: [shopId, installationVersion], references: [id, installationVersion], onDelete: Cascade, onUpdate: Restrict)
+
+  @@unique([shopId, installationVersion])
+  @@map("subscriptions")
+  @@schema("mirror")
+}

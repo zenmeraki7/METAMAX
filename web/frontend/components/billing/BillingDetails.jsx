@@ -17,7 +17,7 @@ export default function BillingDetails({ billing, onManageBilling }) {
         <s-stack class="pb-details__rows" gap="base">
           <s-grid
             class="pb-details__row"
-            gridTemplateColumns="@container (inline-size > 900px) minmax(0, 1fr) minmax(0, 0.85fr), @container (inline-size > 600px) 1fr 1fr, 1fr"
+            gridTemplateColumns="@container (inline-size > 600px) '1fr 1fr', (inline-size > 900px) 'minmax(0, 1fr) minmax(0, 0.85fr)', '1fr'"
             gap="base"
           >
             <s-text class="pb-details__label">Next billing date</s-text>
@@ -31,7 +31,7 @@ export default function BillingDetails({ billing, onManageBilling }) {
 
           <s-grid
             class="pb-details__row"
-            gridTemplateColumns="@container (inline-size > 900px) minmax(0, 1fr) minmax(0, 0.85fr), @container (inline-size > 600px) 1fr 1fr, 1fr"
+            gridTemplateColumns="@container (inline-size > 600px) '1fr 1fr', (inline-size > 900px) 'minmax(0, 1fr) minmax(0, 0.85fr)', '1fr'"
             gap="base"
           >
             <s-text class="pb-details__label">Payment method</s-text>

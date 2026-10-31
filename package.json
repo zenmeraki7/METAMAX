@@ -1,26 +1,21 @@
 {
-  "name": "my-node-app",
+  "name": "newmeta-shopify-express",
   "version": "1.0.0",
-  "main": "web/index.js",
+  "private": true,
   "license": "UNLICENSED",
+  "engines": { "node": ">=22.0.0" },
   "scripts": {
-    "worker": "npm --prefix web run worker",
-    "registrations:repair": "npm --prefix web run registrations:repair",
-    "db:migrate": "npm --prefix web run db:migrate",
-    "test": "npm --prefix web test",
-    "storage:check": "npm --prefix web run storage:check",
-    "redis:up": "docker compose up -d --wait redis",
-    "redis:stop": "docker compose stop redis",
-    "queue:check": "npm --prefix web run queue:check",
     "shopify": "shopify",
-    "build": "shopify app build",
     "dev": "shopify app dev",
+    "build": "shopify app build",
     "info": "shopify app info",
     "generate": "shopify app generate",
-    "deploy": "shopify app deploy"
+    "deploy": "shopify app deploy",
+    "test": "npm --prefix web test",
+    "redis:up": "docker compose up -d --wait redis",
+    "redis:stop": "docker compose stop redis",
+    "redis:check": "npm --prefix web run redis:check",
+    "db:check": "npm --prefix web run db:check"
   },
-  "dependencies": {
-    "@shopify/app": "^3.0.0",
-    "@shopify/cli": "^3.0.0"
-  }
+  "dependencies": { "@shopify/cli": "^3.94.3" }
 }

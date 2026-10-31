@@ -1,0 +1,37 @@
+// Undo stores only touched field values, never another full catalog mirror.
+model ProductSnapshot {
+  id             BigInt     @id @default(autoincrement())
+  shopId         String     @map("shop_id") @db.Text
+  editItemId     BigInt     @map("edit_item_id")
+  beforeValues   Json       @map("before_values") @db.JsonB
+  beforeHash     String?    @map("before_hash") @db.Text
+  afterHash      String?    @map("after_hash") @db.Text
+  beforeRevision BigInt?    @map("before_revision")
+  afterRevision  BigInt?    @map("after_revision")
+  capturedAt     DateTime   @default(now()) @map("captured_at") @db.Timestamptz(3)
+  confirmedAt    DateTime?  @map("confirmed_at") @db.Timestamptz(3)
+  item           EditItem   @relation("CapturedSnapshot", fields: [shopId, editItemId], references: [shopId, id], onDelete: Restrict)
+  restorations   EditItem[] @relation("RestoreSnapshot")
+
+  @@unique([shopId, id])
+  @@unique([shopId, editItemId])
+  @@map("product_snapshots")
+  @@schema("mirror")
+}
+
+// Restoration is a newly approved edit operation with its own durable command.
+// Workers compare current touched values to afterHash before restoring anything.
+model UndoOperation {
+  id                 BigInt        @id @default(autoincrement())
+  shopId             String        @map("shop_id") @db.Text
+  sourceOperationId  BigInt        @map("source_operation_id")
+  restoreOperationId BigInt        @map("restore_operation_id")
+  mode               String        @default("COMPARE_AFTER_HASH") @db.Text
+  createdAt          DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  sourceOperation    EditOperation @relation("UndoSource", fields: [shopId, sourceOperationId], references: [shopId, id], onDelete: Restrict)
+  restoreOperation   EditOperation @relation("UndoRestore", fields: [shopId, restoreOperationId], references: [shopId, id], onDelete: Restrict)
+
+  @@unique([shopId, restoreOperationId])
+  @@map("undo_operations")
+  @@schema("mirror")
+}

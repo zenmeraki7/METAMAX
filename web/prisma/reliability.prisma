@@ -1,0 +1,44 @@
+// METAMAX reliability domain. Loaded through prisma.config.mjs.
+
+model OutboxEvent {
+  id           BigInt     @id @default(autoincrement())
+  shopId       String     @map("shop_id") @db.Text
+  commandId    BigInt     @map("command_id")
+  dedupeKey    String     @map("dedupe_key") @db.Text
+  availableAt  DateTime   @default(now()) @map("available_at") @db.Timestamptz(3)
+  dispatchedAt DateTime?  @map("dispatched_at") @db.Timestamptz(3)
+  attempts     Int        @default(0)
+  leaseToken   String?    @map("lease_token") @db.Text
+  leaseUntil   DateTime?  @map("lease_until") @db.Timestamptz(3)
+  fence        BigInt     @default(0)
+  command      JobCommand @relation(fields: [shopId, commandId], references: [shopId, id], onDelete: Cascade)
+
+  @@unique([shopId, dedupeKey])
+  @@map("outbox_events")
+  @@schema("mirror")
+}
+
+// Reserve before scheduling, then commit command + outbox + result binding in
+// the same transaction. Keys are scoped to both merchant and operation.
+model IdempotencyRecord {
+  shopId      String      @map("shop_id") @db.Text
+  operation   String      @db.Text
+  key         String      @db.Text
+  requestHash String      @map("request_hash") @db.Text
+  status      WorkStatus  @default(PENDING)
+  commandId   BigInt?     @map("command_id")
+  leaseToken  String?     @map("lease_token") @db.Text
+  leaseUntil  DateTime?   @map("lease_until") @db.Timestamptz(3)
+  fence       BigInt      @default(0)
+  response    Json?       @db.JsonB
+  createdAt   DateTime    @default(now()) @map("created_at") @db.Timestamptz(3)
+  completedAt DateTime?   @map("completed_at") @db.Timestamptz(3)
+  expiresAt   DateTime    @map("expires_at") @db.Timestamptz(3)
+  merchant    Shop        @relation(fields: [shopId], references: [id], onDelete: Restrict)
+  command     JobCommand? @relation(fields: [shopId, commandId], references: [shopId, id], onDelete: Restrict)
+
+  @@id([shopId, operation, key])
+  @@index([expiresAt])
+  @@map("idempotency_records")
+  @@schema("mirror")
+}

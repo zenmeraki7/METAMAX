@@ -2,13 +2,62 @@ name: Node.js CI
 
 on: [push, pull_request]
 
+permissions:
+  contents: read
+
 jobs:
+  postgres-semantics:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        node-version: [22, 24]
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_DB: metamax_filter_test
+          POSTGRES_PASSWORD: isolated-ci-fixture
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d metamax_filter_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    defaults:
+      run:
+        working-directory: ./web
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - name: Test backend and production imports
+        run: npm test
+      - name: Test trusted executor and HTTP runtime against PostgreSQL
+        env:
+          FILTER_TEST_DATABASE_URL: postgresql://postgres:isolated-ci-fixture@127.0.0.1:5432/metamax_filter_test
+          FILTER_TEST_DATABASE_ISOLATED: "1"
+        run: node --experimental-test-module-mocks --test filters/integration/postgres.test.js
+      - name: Test migrated schema and installed production mappings
+        env:
+          FILTER_TEST_DATABASE_URL: postgresql://postgres:isolated-ci-fixture@127.0.0.1:5432/metamax_filter_test
+          FILTER_TEST_DATABASE_ISOLATED: "1"
+        run: node --experimental-test-module-mocks --test prisma/schema.test.js
+      - name: Test fresh Edit History V2 in a separate disposable PostgreSQL instance
+        run: npm run test:history:postgres
+      - name: Test V1-to-V2 history upgrade and repository against PostgreSQL
+        run: npm run test:history:upgrade
+
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     strategy:
       matrix:
-        node-version: [18, 20, 22]
+        node-version: [22, 24]
 
     defaults:
       run:
@@ -18,13 +67,28 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           submodules: recursive
-      - name: Find any lock file
-        run: if test -f ../yarn.lock || test -f ../pnpm-lock.yaml || test -f ../package-lock.json; then echo "Please don't commit lock files" && exit 1; fi
       - name: Use Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ matrix.node-version }}
-      - run: yarn install --ignore-engines
+          cache: npm
+          cache-dependency-path: |
+            web/package-lock.json
+            web/frontend/package-lock.json
+      - name: Install backend dependencies
+        run: npm ci
+      - name: Install frontend dependencies
+        working-directory: ./web/frontend
+        run: npm ci
+      - name: Test backend and Field Engine
+        run: npm test
+      - name: Test frontend
+        working-directory: ./web/frontend
+        run: |
+          npm run test:ui
+          npm run test:products
       - name: Build FE for production test
         working-directory: ./web/frontend
-        run: yarn install --ignore-engines && yarn build
+        env:
+          SHOPIFY_API_KEY: ci-build-placeholder
+        run: npm run build

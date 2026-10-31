@@ -46,7 +46,7 @@ export default function SyncSummary({ overview, loading }) {
     <s-grid
       class="sd-summary"
       aria-label="Synchronization overview"
-      gridTemplateColumns="@container (inline-size > 900px) repeat(4, minmax(0, 1fr)), @container (inline-size > 600px) 1fr 1fr, 1fr"
+      gridTemplateColumns="@container (inline-size > 600px) '1fr 1fr', (inline-size > 900px) 'repeat(4, minmax(0, 1fr))', '1fr'"
       gap="base"
     >
       <SummaryCard

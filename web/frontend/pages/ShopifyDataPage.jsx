@@ -4,7 +4,6 @@ import SyncSummary from "../components/settings/SyncSummary.jsx";
 import SyncSourcesTable from "../components/settings/SyncSourcesTable.jsx";
 import useShopifyData from "../hooks/useShopifyData.js";
 import useShopifyToast from "../hooks/useShopifyToast.js";
-import "../styles/shopify-data.css";
 export default function ShopifyDataPage() {
   const { notify } = useShopifyToast();
   const sync = useShopifyData(notify);

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import ProductsInsights from "../components/products/ProductsInsights.jsx";
 import ProductsToolbar from "../components/products/ProductsToolbar.jsx";
 import ProductsTable from "../components/products/ProductsTable.jsx";
@@ -9,7 +10,8 @@ import { catalogNotice } from "../data/products.sync.js";
 import "../styles/products.css";
 const EMPTY_PRODUCTS = [];
 export default function ProductsPage() {
-  const catalog = useProductCatalog();
+  const [params] = useSearchParams();
+  const catalog = useProductCatalog(params.get("search") ?? "");
   const products = catalog.data?.products ?? EMPTY_PRODUCTS;
   const selection = useProductSelection(products);
   const [density, setDensity] = useState("comfortable");
@@ -31,11 +33,13 @@ export default function ProductsPage() {
       catalog.page,
       catalog.search,
       catalog.status,
+      catalog.conditions,
+      catalog.match,
       catalog.data?.snapshotId,
       selection.clearSelection,
     ],
   );
-  const state = catalog.data?.syncStatus;
+  const state = catalog.awaitingInitialSync ? "PENDING" : catalog.data?.syncStatus;
   const hasCatalog = Boolean(catalog.data?.snapshotId);
   const notice = catalogNotice(state, hasCatalog);
   const emptyMessage = catalog.loading
@@ -48,7 +52,7 @@ export default function ProductsPage() {
           : "Your products will appear when the initial sync finishes."
         : catalog.data.summary.productCount === 0
           ? "No products in your store yet. Add your first product in Shopify."
-          : "No products match your search or status. Try changing your filters.";
+          : "No products match your search or filters. Try changing your filters.";
   return (
     <s-page heading="Products" inlineSize="large">
       <s-button
@@ -96,7 +100,9 @@ export default function ProductsPage() {
             gap="base"
           >
             <s-text>{catalog.error}</s-text>
-            <s-button onClick={catalog.reload}>Try again</s-button>
+            <s-button onClick={catalog.reload} disabled={catalog.loading}>
+              Try again
+            </s-button>
           </s-stack>
         )}
         {notice && (
@@ -114,6 +120,9 @@ export default function ProductsPage() {
           setSearch={catalog.setSearch}
           status={catalog.status}
           setStatus={catalog.setStatus}
+          conditions={catalog.conditions}
+          match={catalog.match}
+          setAdvancedFilters={catalog.setAdvancedFilters}
           visibleColumns={visibleColumns}
           toggleColumn={toggleColumn}
           selectedCount={selection.selectedCount}
@@ -122,6 +131,11 @@ export default function ProductsPage() {
           setAllVisibleSelected={selection.setAllVisibleSelected}
           hasProducts={products.length > 0}
         />
+        {catalog.autoRefreshAvailable === false && (
+          <s-text color="subdued">
+            Automatic updates are unavailable. Use Refresh to check for changes.
+          </s-text>
+        )}
         <ProductsTable
           products={products}
           visibleColumns={visibleColumns}

@@ -9,9 +9,9 @@ export default function SettingsSection({ section }) {
   return (
     <s-section class="ms-section" aria-labelledby={`ms-section-${section.id}`}>
       <s-stack gap="base">
-        <s-stack
+        <s-grid
           class="ms-section__header"
-          direction="inline"
+          gridTemplateColumns="auto minmax(0, 1fr)"
           gap="base"
           alignItems="center"
         >
@@ -32,7 +32,7 @@ export default function SettingsSection({ section }) {
 
             <s-paragraph>{section.description}</s-paragraph>
           </s-stack>
-        </s-stack>
+        </s-grid>
 
         <s-stack class="ms-section__items" gap="base">
           {section.items.map((item) => (

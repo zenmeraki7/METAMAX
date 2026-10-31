@@ -11,23 +11,29 @@ export default function SettingsItem({ item }) {
   const Icon = icons[item.icon] ?? "tag";
   return (
     <s-link class="ms-setting-item" href={item.href}>
-      <s-stack
-        class="ms-setting-item__icon"
-        aria-hidden="true"
-        direction="inline"
-        gap="small"
+      <s-grid
+        gridTemplateColumns="auto minmax(0, 1fr) auto"
+        gap="base"
         alignItems="center"
       >
-        <s-icon type={Icon} />
-      </s-stack>
+        <s-stack
+          class="ms-setting-item__icon"
+          aria-hidden="true"
+          direction="inline"
+          gap="small"
+          alignItems="center"
+        >
+          <s-icon type={Icon} />
+        </s-stack>
 
-      <s-text class="ms-setting-item__copy">
-        <s-text type="strong">{item.title}</s-text>
+        <s-stack gap="small">
+          <s-text type="strong">{item.title}</s-text>
 
-        <s-text>{item.description}</s-text>
-      </s-text>
+          <s-text>{item.description}</s-text>
+        </s-stack>
 
-      <s-icon type="chevron-right" />
+        <s-icon type="chevron-right" />
+      </s-grid>
     </s-link>
   );
 }

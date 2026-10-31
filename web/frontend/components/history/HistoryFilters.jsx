@@ -1,3 +1,8 @@
+import {
+  HISTORY_STATUS_OPTIONS,
+  HISTORY_TYPE_OPTIONS,
+} from "../../data/history.demo.js";
+
 function FilterSelect({ label, value, options, onChange }) {
   const defaultValue = label === "Date" ? "Any time" : "All";
   const handleChange = (event) => {
@@ -36,7 +41,7 @@ export default function HistoryFilters({ filters }) {
   return (
     <s-grid
       class="mh-filters"
-      gridTemplateColumns="@container (inline-size > 900px) minmax(220px, 1fr) minmax(105px, auto) minmax(95px, auto) minmax(105px, auto) minmax(130px, auto) auto, @container (inline-size > 600px) 1fr 1fr, 1fr"
+      gridTemplateColumns="@container (inline-size > 600px) '1fr 1fr', (inline-size > 900px) 'minmax(220px, 1fr) minmax(105px, auto) minmax(95px, auto) minmax(105px, auto) minmax(130px, auto) auto', '1fr'"
       gap="base"
       alignItems="center"
     >
@@ -53,14 +58,14 @@ export default function HistoryFilters({ filters }) {
       <FilterSelect
         label="Status"
         value={filters.status}
-        options={["All", "Completed", "Cancelled", "Failed"]}
+        options={HISTORY_STATUS_OPTIONS}
         onChange={filters.setStatus}
       />
 
       <FilterSelect
         label="Type"
         value={filters.type}
-        options={["All", "Edit", "Export", "Import", "File"]}
+        options={HISTORY_TYPE_OPTIONS}
         onChange={filters.setType}
       />
 

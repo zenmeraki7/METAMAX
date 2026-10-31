@@ -5,7 +5,7 @@ export default function useProductSelection(products = []) {
 
   const visibleIds = useMemo(
     () => products.map((product) => product.id),
-    [products]
+    [products],
   );
 
   const selectedCount = selectedIds.size;
@@ -26,6 +26,7 @@ export default function useProductSelection(products = []) {
 
   const setOneSelected = useCallback((id, checked) => {
     setSelectedIds((prev) => {
+      if (prev.has(id) === checked) return prev;
       const next = new Set(prev);
       if (checked) {
         next.add(id);
@@ -50,11 +51,11 @@ export default function useProductSelection(products = []) {
         return next;
       });
     },
-    [visibleIds]
+    [visibleIds],
   );
 
   const clearSelection = useCallback(() => {
-    setSelectedIds(new Set());
+    setSelectedIds((previous) => (previous.size ? new Set() : previous));
   }, []);
 
   return {

@@ -1,10 +1,5 @@
-
-export default function TutorialDialog({
-  dialogRef,
-  onClose,
-}) {
-  const videoUrl =
-    import.meta.env.VITE_TUTORIAL_VIDEO_URL?.trim();
+export default function TutorialDialog({ dialogRef, onClose }) {
+  const videoUrl = import.meta.env.VITE_TUTORIAL_VIDEO_URL?.trim();
 
   return (
     <s-modal
@@ -43,11 +38,7 @@ export default function TutorialDialog({
           slot="primary-action"
           variant="primary"
           onClick={() => {
-            window.open(
-              videoUrl,
-              "_blank",
-              "noopener,noreferrer"
-            );
+            window.open(videoUrl, "_blank", "noopener,noreferrer");
           }}
         >
           Open tutorial

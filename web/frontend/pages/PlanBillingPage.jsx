@@ -4,7 +4,6 @@ import BillingHelp from "../components/billing/BillingHelp.jsx";
 import BillingDialog from "../components/billing/BillingDialog.jsx";
 import usePlanBilling from "../hooks/usePlanBilling.js";
 import { demoPlans, demoBilling } from "../data/plans.demo.js";
-import "../styles/billing.css";
 export default function PlanBillingPage() {
   const billing = usePlanBilling();
   return (
@@ -16,6 +15,10 @@ export default function PlanBillingPage() {
         Choose the plan that fits your store and manage billing.
       </s-paragraph>
       <s-stack gap="base">
+        <s-banner tone="info">
+          These are example plans and billing details. No charges are created
+          from this page.
+        </s-banner>
         <s-stack class="pb-content" gap="base">
           <PlanGrid
             plans={demoPlans}
@@ -25,7 +28,7 @@ export default function PlanBillingPage() {
 
           <s-grid
             class="pb-lower-grid"
-            gridTemplateColumns="@container (inline-size > 900px) repeat(2, minmax(0, 1fr)), @container (inline-size > 600px) 1fr 1fr, 1fr"
+            gridTemplateColumns="@container (inline-size > 600px) '1fr 1fr', (inline-size > 900px) 'repeat(2, minmax(0, 1fr))', '1fr'"
             gap="base"
           >
             <BillingDetails

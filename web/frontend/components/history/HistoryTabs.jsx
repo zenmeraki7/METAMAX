@@ -1,29 +1,38 @@
 import { HISTORY_TABS } from "../../data/history.demo.js";
+import { useRef } from "react";
 const icons = {
   All: "layout-block",
   Edit: "edit",
+  Undo: "undo",
   Export: "download",
   Import: "upload",
+  Sync: "refresh",
+  Automation: "clock",
   File: "note",
 };
 export default function HistoryTabs({ active, onChange }) {
+  const buttons = useRef(new Map());
+  const activate = (id) => {
+    onChange(id);
+    buttons.current.get(id)?.focus();
+  };
   const tabIds = HISTORY_TABS.map((t) => t.id);
   const activeIndex = Math.max(0, tabIds.indexOf(active));
   const handleKeyDown = (event) => {
     if (event.key === "ArrowRight") {
       event.preventDefault();
       const nextIndex = (activeIndex + 1) % tabIds.length;
-      onChange(tabIds[nextIndex]);
+      activate(tabIds[nextIndex]);
     } else if (event.key === "ArrowLeft") {
       event.preventDefault();
       const prevIndex = (activeIndex - 1 + tabIds.length) % tabIds.length;
-      onChange(tabIds[prevIndex]);
+      activate(tabIds[prevIndex]);
     } else if (event.key === "Home") {
       event.preventDefault();
-      onChange(tabIds[0]);
+      activate(tabIds[0]);
     } else if (event.key === "End") {
       event.preventDefault();
-      onChange(tabIds[tabIds.length - 1]);
+      activate(tabIds[tabIds.length - 1]);
     }
   };
   return (
@@ -39,6 +48,10 @@ export default function HistoryTabs({ active, onChange }) {
           return (
             <s-button
               key={tab.id}
+              ref={(node) => {
+                if (node) buttons.current.set(tab.id, node);
+                else buttons.current.delete(tab.id);
+              }}
               role="tab"
               aria-selected={isSelected}
               tabIndex={isSelected ? 0 : -1}

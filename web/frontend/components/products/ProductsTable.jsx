@@ -1,4 +1,4 @@
-import { useId } from "react";
+import { useCallback, useId, useMemo } from "react";
 
 import ProductRow from "./ProductRow.jsx";
 import { productColumns } from "../../data/products.columns.js";
@@ -18,11 +18,7 @@ const COLUMN_LIST_SLOTS = Object.freeze({
 const EMPTY_VALUE = "—";
 
 function formatTotal(value) {
-  if (
-    typeof value !== "number" ||
-    !Number.isSafeInteger(value) ||
-    value < 0
-  ) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
     return null;
   }
 
@@ -36,9 +32,7 @@ function getColumns(visibleColumns) {
 
   const visible = new Set(visibleColumns);
 
-  return productColumns.filter(({ key }) =>
-    visible.has(key)
-  );
+  return productColumns.filter(({ key }) => visible.has(key));
 }
 
 export default function ProductsTable({
@@ -58,22 +52,17 @@ export default function ProductsTable({
 }) {
   const tableId = useId();
 
-  const columns = getColumns(visibleColumns);
+  const columns = useMemo(() => getColumns(visibleColumns), [visibleColumns]);
 
   const isLoading = Boolean(loading);
   const hasError = Boolean(error);
 
-  const visibleProducts =
-    !hasError && Array.isArray(products)
-      ? products
-      : [];
+  const visibleProducts = !hasError && Array.isArray(products) ? products : [];
 
   const hasProducts = visibleProducts.length > 0;
 
   const selectedIds =
-    selection?.selectedIds instanceof Set
-      ? selection.selectedIds
-      : null;
+    selection?.selectedIds instanceof Set ? selection.selectedIds : null;
 
   const canSelectOne =
     !isLoading &&
@@ -87,17 +76,12 @@ export default function ProductsTable({
     typeof selection?.setAllVisibleSelected === "function";
 
   const allVisibleSelected =
-    canSelectAll &&
-    Boolean(selection.allVisibleSelected);
+    canSelectAll && Boolean(selection.allVisibleSelected);
 
   const partiallySelected =
-    canSelectAll &&
-    Boolean(selection.partiallySelected);
+    canSelectAll && Boolean(selection.partiallySelected);
 
-  const pageNumber =
-    Number.isSafeInteger(page) && page > 0
-      ? page
-      : 1;
+  const pageNumber = Number.isSafeInteger(page) && page > 0 ? page : 1;
 
   const formattedTotal = formatTotal(total);
 
@@ -115,38 +99,33 @@ export default function ProductsTable({
 
   const paginationEnabled =
     !hasError &&
-    (
-      Boolean(hasPreviousPage) ||
-      Boolean(hasNextPage) ||
-      pageNumber > 1
-    );
+    (Boolean(hasPreviousPage) || Boolean(hasNextPage) || pageNumber > 1);
 
-  const showTable =
-    !hasError && (hasProducts || !isLoading);
+  const showTable = !hasError && (hasProducts || !isLoading);
 
-  const showLoading =
-    !hasError && !hasProducts && isLoading;
+  const showLoading = !hasError && !hasProducts && isLoading;
 
-  const showEmpty =
-    !hasError && !hasProducts && !isLoading;
+  const showEmpty = !hasError && !hasProducts && !isLoading;
 
   function handleSelectAll(event) {
     if (!canSelectAll) {
       return;
     }
 
-    selection.setAllVisibleSelected(
-      Boolean(event.currentTarget.checked)
-    );
+    selection.setAllVisibleSelected(Boolean(event.currentTarget.checked));
   }
 
-  function handleSelectProduct(id, checked) {
-    if (!canSelectOne) {
-      return;
-    }
+  const selectOne = selection?.setOneSelected;
+  const handleSelectProduct = useCallback(
+    (id, checked) => {
+      if (!canSelectOne) {
+        return;
+      }
 
-    selection.setOneSelected(id, checked);
-  }
+      selectOne(id, checked);
+    },
+    [canSelectOne, selectOne],
+  );
 
   function handlePreviousPage() {
     if (canGoPrevious) {
@@ -166,10 +145,7 @@ export default function ProductsTable({
       : `${formattedTotal} matching products · Page ${pageNumber}`;
 
   return (
-    <s-section
-      padding="none"
-      accessibilityLabel="Product catalog"
-    >
+    <s-section padding="none" accessibilityLabel="Product catalog">
       <s-stack gap="none">
         {showTable && (
           <s-table
@@ -178,16 +154,12 @@ export default function ProductsTable({
             paginate={paginationEnabled}
             hasPreviousPage={canGoPrevious}
             hasNextPage={canGoNext}
-            onPreviousPage={handlePreviousPage}
-            onNextPage={handleNextPage}
+            onpreviouspage={handlePreviousPage}
+            onnextpage={handleNextPage}
           >
             <s-table-header-row>
               <s-table-header listSlot="primary">
-                <s-stack
-                  direction="inline"
-                  gap="base"
-                  alignItems="center"
-                >
+                <s-stack direction="inline" gap="base" alignItems="center">
                   <s-checkbox
                     accessibilityLabel="Select all visible products"
                     checked={allVisibleSelected}
@@ -212,14 +184,8 @@ export default function ProductsTable({
               {columns.map(({ key, label }) => (
                 <s-table-header
                   key={key}
-                  listSlot={
-                    COLUMN_LIST_SLOTS[key] ?? "labeled"
-                  }
-                  format={
-                    NUMERIC_COLUMNS.has(key)
-                      ? "numeric"
-                      : "base"
-                  }
+                  listSlot={COLUMN_LIST_SLOTS[key] ?? "labeled"}
+                  format={NUMERIC_COLUMNS.has(key) ? "numeric" : "base"}
                 >
                   {label}
                 </s-table-header>
@@ -232,12 +198,11 @@ export default function ProductsTable({
                   key={product.id}
                   product={product}
                   columns={columns}
-                  selected={
-                    selectedIds?.has(product.id) ?? false
-                  }
+                  selected={selectedIds?.has(product.id) ?? false}
                   onSelect={handleSelectProduct}
                   checkboxId={`${tableId}-product-${index}`}
                   disabled={!canSelectOne}
+                  density={density}
                 />
               ))}
             </s-table-body>
@@ -246,10 +211,7 @@ export default function ProductsTable({
 
         {hasError && (
           <s-box padding="base">
-            <s-banner
-              tone="critical"
-              heading="Unable to load products"
-            >
+            <s-banner tone="critical" heading="Unable to load products">
               {typeof error === "string" && error.trim()
                 ? error
                 : "Something went wrong while loading the catalog."}
@@ -259,30 +221,18 @@ export default function ProductsTable({
 
         {showLoading && (
           <s-box padding="large">
-            <s-stack
-              gap="small"
-              alignItems="center"
-            >
-              <s-spinner
-                accessibilityLabel="Loading products"
-              />
+            <s-stack gap="small" alignItems="center">
+              <s-spinner accessibilityLabel="Loading products" />
 
-              <s-text color="subdued">
-                Loading products…
-              </s-text>
+              <s-text color="subdued">Loading products…</s-text>
             </s-stack>
           </s-box>
         )}
 
         {showEmpty && (
           <s-box padding="large">
-            <s-stack
-              gap="small"
-              alignItems="center"
-            >
-              <s-text color="subdued">
-                {emptyMessage}
-              </s-text>
+            <s-stack gap="small" alignItems="center">
+              <s-text color="subdued">{emptyMessage}</s-text>
             </s-stack>
           </s-box>
         )}
@@ -291,9 +241,7 @@ export default function ProductsTable({
           <s-box padding="base">
             <s-text color="subdued">
               {countLabel}
-              {isLoading && hasProducts
-                ? " · Updating…"
-                : ""}
+              {isLoading && hasProducts ? " · Updating…" : ""}
             </s-text>
           </s-box>
         )}

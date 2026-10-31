@@ -1,0 +1,138 @@
+// METAMAX operations domain. Loaded together through prisma.config.mjs.
+
+enum WorkStatus {
+  PENDING
+  RUNNING
+  RETRY
+  SUCCEEDED
+  FAILED
+  CANCELLED
+
+  @@schema("mirror")
+}
+
+// Durable command is the source of truth; BullMQ carries only its identity.
+model JobCommand {
+  id                BigInt              @id @default(autoincrement())
+  shopId            String              @map("shop_id") @db.Text
+  contractId        String              @map("contract_id") @db.Text
+  idempotencyKey    String              @map("idempotency_key") @db.Text
+  kind              String              @db.Text
+  status            WorkStatus          @default(PENDING)
+  attempts          Int                 @default(0)
+  maxAttempts       Int                 @default(8) @map("max_attempts")
+  availableAt       DateTime            @default(now()) @map("available_at") @db.Timestamptz(3)
+  cancelRequestedAt DateTime?           @map("cancel_requested_at") @db.Timestamptz(3)
+  leaseToken        String?             @map("lease_token") @db.Text
+  leaseUntil        DateTime?           @map("lease_until") @db.Timestamptz(3)
+  fence             BigInt              @default(0)
+  checkpoint        Json?               @db.JsonB
+  result            Json?               @db.JsonB
+  lastError         String?             @map("last_error") @db.Text
+  createdAt         DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime            @updatedAt @map("updated_at") @db.Timestamptz(3)
+  contract          PreviewContract     @relation(fields: [shopId, contractId], references: [shopId, id], onDelete: Restrict)
+  outbox            OutboxEvent[]
+  items             EditItem[]
+  artifacts         JobArtifact[]
+  edits             EditOperation[]
+  idempotency       IdempotencyRecord[]
+  scheduleOccurrences ScheduleOccurrence[]
+  exportJobs ExportJob[]
+
+  @@unique([shopId, id])
+  @@unique([shopId, idempotencyKey])
+  @@unique([shopId, kind, contractId], map: "job_commands_approved_operation_key")
+  @@map("job_commands")
+  @@schema("mirror")
+}
+
+// Scheduling stores an operation template, never a reusable authorization grant.
+// Each occurrence resolves fresh fields, coverage, approval and a new selection.
+model JobSchedule {
+  id         BigInt    @id @default(autoincrement())
+  shopId     String    @map("shop_id") @db.Text
+  enabled    Boolean   @default(false)
+  timezone   String    @db.Text
+  recurrence String    @db.Text
+  operation  String    @db.Text
+  template   Json      @db.JsonB
+  nextRunAt  DateTime  @map("next_run_at") @db.Timestamptz(3)
+  lastRunAt  DateTime? @map("last_run_at") @db.Timestamptz(3)
+  leaseToken String?   @map("lease_token") @db.Text
+  leaseUntil DateTime? @map("lease_until") @db.Timestamptz(3)
+  fence      BigInt    @default(0)
+  merchant   Shop      @relation(fields: [shopId], references: [id], onDelete: Restrict)
+  occurrences ScheduleOccurrence[]
+
+  @@unique([shopId, id])
+  @@map("job_schedules")
+  @@schema("mirror")
+}
+
+model ScheduleOccurrence {
+  id String @id @db.Text
+  shopId String @map("shop_id") @db.Text
+  scheduleId BigInt @map("schedule_id")
+  scheduledFor DateTime @map("scheduled_for") @db.Timestamptz(3)
+  template Json @db.JsonB
+  operation String @db.Text
+  status String @default("QUEUED") @db.Text
+  phase String @default("SELECT") @db.Text
+  snapshotId String? @map("snapshot_id") @db.Text
+  contractId String? @map("contract_id") @db.Text
+  commandId BigInt? @map("command_id")
+  attempts Int @default(0)
+  fence BigInt @default(0)
+  leaseToken String? @map("lease_token") @db.Text
+  leaseUntil DateTime? @map("lease_until") @db.Timestamptz(3)
+  nextAttemptAt DateTime @default(now()) @map("next_attempt_at") @db.Timestamptz(3)
+  lastError String? @map("last_error") @db.Text
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(3)
+  schedule JobSchedule @relation(fields:[shopId,scheduleId],references:[shopId,id],onDelete:Restrict)
+  snapshot SelectionSnapshot? @relation(fields:[shopId,snapshotId],references:[shopId,id],onDelete:Restrict)
+  contract PreviewContract? @relation(fields:[shopId,contractId],references:[shopId,id],onDelete:Restrict)
+  command JobCommand? @relation(fields:[shopId,commandId],references:[shopId,id],onDelete:Restrict)
+  @@unique([shopId,id])
+  @@unique([shopId,scheduleId,scheduledFor])
+  @@index([status,nextAttemptAt,leaseUntil],map:"schedule_occurrences_due")
+  @@map("schedule_occurrences")
+  @@schema("mirror")
+}
+
+// Large import/export contents live in object storage; only integrity metadata here.
+model JobArtifact {
+  id         BigInt     @id @default(autoincrement())
+  shopId     String     @map("shop_id") @db.Text
+  commandId  BigInt     @map("command_id")
+  objectKey  String     @map("object_key") @db.Text
+  kind       String     @db.Text
+  sha256     String     @db.Text
+  byteLength BigInt     @map("byte_length")
+  rowCount   BigInt?    @map("row_count")
+  expiresAt  DateTime   @map("expires_at") @db.Timestamptz(3)
+  command    JobCommand @relation(fields: [shopId, commandId], references: [shopId, id], onDelete: Cascade)
+
+  @@unique([shopId, objectKey])
+  @@index([shopId, commandId])
+  @@map("job_artifacts")
+  @@schema("mirror")
+}
+
+model AuditEvent {
+  id          BigInt   @id @default(autoincrement())
+  shopId      String   @map("shop_id") @db.Text
+  operationId String?  @map("operation_id") @db.Text
+  action      String   @db.Text
+  actorId     String?  @map("actor_id") @db.Text
+  outcome     String   @db.Text
+  // Redacted summaries only; no access tokens, webhook bodies or full catalogs.
+  summary     Json?    @db.JsonB
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  merchant    Shop     @relation(fields: [shopId], references: [id], onDelete: Restrict)
+
+  @@index([shopId, createdAt, id])
+  @@map("audit_events")
+  @@schema("mirror")
+}

@@ -1,20 +1,41 @@
 import HistoryActionMenu from "./HistoryActionMenu.jsx";
 const icons = {
   Edit: "edit",
+  Undo: "undo",
   Export: "download",
   Import: "upload",
+  Sync: "refresh",
+  Automation: "clock",
   File: "note",
 };
 const typeLabels = {
   Edit: "Edit",
+  Undo: "Undo",
   Export: "Export",
   Import: "Import",
+  Sync: "Sync",
+  Automation: "Automation",
   File: "File",
 };
 const statusTones = {
   Completed: "success",
   Cancelled: "neutral",
   Failed: "critical",
+  Running: "info",
+  Queued: "attention",
+  Pending: "attention",
+  Retrying: "warning",
+  Expired: "neutral",
+};
+const statusIcons = {
+  Completed: "check-circle",
+  Cancelled: "x-circle",
+  Failed: "alert-circle",
+  Running: "refresh",
+  Queued: "clock",
+  Pending: "clock",
+  Retrying: "refresh",
+  Expired: "alert-circle",
 };
 export default function HistoryRow({
   item,
@@ -71,14 +92,8 @@ export default function HistoryRow({
 
       <s-table-cell>
         <s-badge
-          tone={statusTones[item.status]}
-          icon={
-            item.status === "Completed"
-              ? "check-circle"
-              : item.status === "Failed"
-                ? "alert-circle"
-                : "x-circle"
-          }
+          tone={statusTones[item.status] || "neutral"}
+          icon={statusIcons[item.status] || "info"}
         >
           {item.status}
         </s-badge>

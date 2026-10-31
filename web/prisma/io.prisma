@@ -1,0 +1,109 @@
+model ImportPreview {
+  id String @id @db.Text
+  shopId String @map("shop_id") @db.Text
+  snapshotId String @map("snapshot_id") @db.Text
+  status String @default("DRAFT") @db.Text
+  payload Json @db.JsonB
+  canonicalPreview String @map("canonical_preview") @db.Text
+  previewHash String @map("preview_hash") @db.Text
+  createdBy String @map("created_by") @db.Text
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(3)
+  contractId String? @map("contract_id") @db.Text
+  approvedBy String? @map("approved_by") @db.Text
+  approvedAt DateTime? @map("approved_at") @db.Timestamptz(3)
+  snapshot SelectionSnapshot @relation(fields:[shopId,snapshotId],references:[shopId,id],onDelete:Restrict)
+  contract PreviewContract? @relation(fields:[shopId,contractId],references:[shopId,id],onDelete:Restrict)
+  @@unique([shopId,id])
+  @@map("import_previews")
+  @@schema("mirror")
+}
+
+model ExportJob {
+  id String @id @db.Text
+  shopId String @map("shop_id") @db.Text
+  commandId BigInt @map("command_id")
+  installationVersion String @map("installation_version") @db.Text
+  generationId String @map("generation_id") @db.Text
+  coverageRevision String @map("coverage_revision") @db.Text
+  mappingVersion String @map("mapping_version") @db.Text
+  snapshotId String @map("snapshot_id") @db.Text
+  readLeaseId String @map("read_lease_id") @db.Text
+  format String @db.Text
+  status String @default("QUEUED") @db.Text
+  attempts Int @default(0)
+  fence BigInt @default(0)
+  leaseToken String? @map("lease_token") @db.Text
+  leaseUntil DateTime? @map("lease_until") @db.Timestamptz(3)
+  nextAttemptAt DateTime @default(now()) @map("next_attempt_at") @db.Timestamptz(3)
+  artifactKey String? @map("artifact_key") @db.Text
+  sha256 String? @db.Text
+  byteLength BigInt? @map("byte_length")
+  rowCount BigInt? @map("row_count")
+  lastError String? @map("last_error") @db.Text
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(3)
+  command JobCommand @relation(fields:[shopId,commandId],references:[shopId,id],onDelete:Restrict)
+  generation MirrorGeneration @relation(fields:[shopId,generationId,coverageRevision,mappingVersion],references:[shopId,id,coverageRevision,mappingVersion],onDelete:Restrict,onUpdate:Restrict)
+  snapshot SelectionSnapshot @relation(fields:[shopId,snapshotId],references:[shopId,id],onDelete:Restrict)
+  @@unique([shopId,id])
+  @@unique([shopId,commandId,format])
+  @@map("export_jobs")
+  @@schema("mirror")
+}
+
+model ExportManifestJob {
+  id                  String                 @id @db.Uuid
+  shopId              String                 @map("shop_id") @db.Text
+  installationId      String                 @map("installation_id") @db.Text
+  idempotencyKey      String                 @map("idempotency_key") @db.Text
+  requestFingerprint  String                 @map("request_fingerprint") @db.Text
+  manifestFingerprint String                 @map("manifest_fingerprint") @db.Text
+  contractVersion     Int                    @map("contract_version")
+  manifestVersion     Int                    @map("manifest_version")
+  generationId        String                 @map("generation_id") @db.Text
+  coverageRevision    String                 @map("coverage_revision") @db.Text
+  mappingVersion      String                 @map("mapping_version") @db.Text
+  readLeaseId         String                 @map("read_lease_id") @db.Text
+  manifest            Json                   @db.JsonB
+  state               String                 @default("QUEUED") @db.Text
+  attempts            Int                    @default(0)
+  fenceEpoch          BigInt                 @default(0) @map("fence_epoch")
+  leaseToken          String?                @map("lease_token") @db.Uuid
+  leaseExpiresAt      DateTime?              @map("lease_expires_at") @db.Timestamptz(3)
+  createdAt           DateTime               @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt           DateTime               @default(now()) @map("updated_at") @db.Timestamptz(3)
+  merchant            Shop                   @relation(fields: [shopId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  generation          MirrorGeneration       @relation(fields: [shopId, generationId, coverageRevision, mappingVersion], references: [shopId, id, coverageRevision, mappingVersion], onDelete: Restrict, onUpdate: Restrict)
+  readLease           GenerationReadLease    @relation(fields: [shopId, readLeaseId], references: [shopId, id], onDelete: Restrict, onUpdate: Restrict)
+  outbox              ExportDispatchOutbox?
+
+  @@unique([shopId, id])
+  @@unique([shopId, installationId, idempotencyKey], map: "export_manifest_jobs_idempotency_unique")
+  @@index([shopId, state, createdAt], map: "export_manifest_jobs_shop_state_idx")
+  @@map("export_manifest_jobs")
+  @@schema("mirror")
+}
+
+model ExportDispatchOutbox {
+  id             BigInt            @id @default(autoincrement())
+  shopId         String            @map("shop_id") @db.Text
+  installationId String            @map("installation_id") @db.Text
+  exportJobId    String            @map("export_job_id") @db.Uuid
+  dedupeKey      String            @map("dedupe_key") @db.Text
+  payload        Json              @db.JsonB
+  availableAt    DateTime          @default(now()) @map("available_at") @db.Timestamptz(3)
+  dispatchedAt   DateTime?         @map("dispatched_at") @db.Timestamptz(3)
+  attempts       Int               @default(0)
+  leaseToken     String?           @map("lease_token") @db.Uuid
+  leaseExpiresAt DateTime?         @map("lease_expires_at") @db.Timestamptz(3)
+  fenceEpoch     BigInt            @default(0) @map("fence_epoch")
+  createdAt      DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+  exportJob      ExportManifestJob @relation(fields: [shopId, exportJobId], references: [shopId, id], onDelete: Cascade, onUpdate: Restrict)
+
+  @@unique([shopId, dedupeKey])
+  @@unique([shopId, exportJobId])
+  @@index([availableAt, id], map: "export_dispatch_outbox_due_idx")
+  @@map("export_dispatch_outbox")
+  @@schema("mirror")
+}

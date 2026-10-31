@@ -1,0 +1,72 @@
+// METAMAX bulk-editing domain. Loaded through prisma.config.mjs.
+
+model EditItem {
+  id                BigInt           @id @default(autoincrement())
+  shopId            String           @map("shop_id") @db.Text
+  commandId         BigInt           @map("command_id")
+  resourceId        String           @map("resource_id") @db.Text
+  status            WorkStatus       @default(PENDING)
+  // Before-values live once in ProductSnapshot; this is the approved target.
+  intendedValues    Json             @map("intended_values") @db.JsonB
+  observedRevision  BigInt?          @map("observed_revision")
+  attempts          Int              @default(0)
+  nextAttemptAt     DateTime?        @map("next_attempt_at") @db.Timestamptz(3)
+  lastError         String?          @map("last_error") @db.Text
+  command           JobCommand       @relation(fields: [shopId, commandId], references: [shopId, id], onDelete: Cascade)
+  operation         EditOperation    @relation(fields: [shopId, commandId], references: [shopId, commandId], onDelete: Restrict, map: "edit_item_operation_fkey")
+  capturedSnapshot  ProductSnapshot? @relation("CapturedSnapshot")
+  restoreSnapshotId BigInt?          @map("restore_snapshot_id")
+  restoreSnapshot   ProductSnapshot? @relation("RestoreSnapshot", fields: [shopId, restoreSnapshotId], references: [shopId, id], onDelete: Restrict)
+
+  @@unique([shopId, id])
+  @@unique([shopId, commandId, resourceId])
+  @@index([shopId, commandId, status, id])
+  @@map("job_items")
+  @@schema("mirror")
+}
+
+model PreviewContract {
+  importPreviews ImportPreview[]
+  shopId           String            @map("shop_id") @db.Text
+  id               String            @default(uuid()) @db.Text
+  snapshotId       String            @map("snapshot_id") @db.Text
+  operation        String            @db.Text
+  approvalRevision String            @default(uuid()) @map("approval_revision") @db.Text
+  status           ApprovalStatus    @default(DRAFT)
+  // Server-normalized operations, write allowlist, versions and definition pins.
+  contract         Json              @db.JsonB
+  contractHash     String            @map("contract_hash") @db.Text
+  hashVersion      String            @default("legacy-v1") @map("hash_version") @db.Text
+  canonicalContract String?          @map("canonical_contract") @db.Text
+  approvedBy       String?           @map("approved_by") @db.Text
+  approvedAt       DateTime?         @map("approved_at") @db.Timestamptz(3)
+  expiresAt        DateTime          @map("expires_at") @db.Timestamptz(3)
+  snapshot         SelectionSnapshot @relation(fields: [shopId, snapshotId], references: [shopId, id], onDelete: Restrict)
+  commands         JobCommand[]
+  scheduleOccurrences ScheduleOccurrence[]
+  edits            EditOperation[]
+
+  @@id([shopId, id])
+  @@map("execution_contracts")
+  @@schema("mirror")
+}
+
+// Bulk-edit aggregate. JobCommand owns scheduling, leases, retries and status;
+// the approved payload remains in PreviewContract instead of being duplicated.
+model EditOperation {
+  id           BigInt          @id @default(autoincrement())
+  shopId       String          @map("shop_id") @db.Text
+  commandId    BigInt          @map("command_id")
+  previewId    String          @map("preview_id") @db.Text
+  createdAt    DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+  command      JobCommand      @relation(fields: [shopId, commandId], references: [shopId, id], onDelete: Restrict)
+  preview      PreviewContract @relation(fields: [shopId, previewId], references: [shopId, id], onDelete: Restrict)
+  items        EditItem[]
+  sourceUndos  UndoOperation[] @relation("UndoSource")
+  restorations UndoOperation[] @relation("UndoRestore")
+
+  @@unique([shopId, id])
+  @@unique([shopId, commandId])
+  @@map("edit_operations")
+  @@schema("mirror")
+}

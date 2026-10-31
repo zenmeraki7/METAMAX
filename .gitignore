@@ -40,3 +40,8 @@ web/database.sqlite
 web/live-catalog-verification.json
 web/scope-release-approval.png
 web/scope-update-released.png
+
+# Local audit and testing artifacts
+.audit/
+web/part-c-tests.txt
+web/prisma-fresh/

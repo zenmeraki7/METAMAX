@@ -1,342 +1,136 @@
-# Shopify App Template for Node
+# Shopify Node.js / Express foundation
 
-Webhook persistence, recovery workers, API resource controls, and privacy cleanup
-are documented in [Reconciliation operations](docs/reconciliation-operations.md).
+The backend uses Shopify's official Node/Express app template, cloned from
+`https://github.com/Shopify/shopify-app-template-node` at commit
+`4e73e21a8dd424f1784d916e532103683291cde9`. Only backend files were selected;
+the template's frontend submodule was never initialized. The existing
+React/Polaris frontend in `web/frontend` is preserved.
 
-## Cloudflare R2 object storage
+## Run
 
-The backend has private object storage helpers in `web/storage.js`, using the
-S3-compatible SDK with Standard storage. Enable R2 in your Cloudflare account,
-create a private Standard bucket named `newmeta`, and create an R2 API token with
-Object Read & Write permissions scoped to that bucket. Save its Access Key ID
-and Secret Access Key in the ignored `web/.env` file:
+Use Node.js 22 or 24. Install the three package boundaries:
 
-```dotenv
-R2_ACCOUNT_ID=your-cloudflare-account-id
-R2_ACCESS_KEY_ID=your-r2-access-key-id
-R2_SECRET_ACCESS_KEY=your-r2-secret-access-key
-R2_BUCKET=newmeta
-```
-
-Use `R2_ENDPOINT` only if a jurisdiction-specific endpoint is needed. Run
-`npm run storage:check` from the project root to verify bucket access and a
-temporary object's upload/download/delete cycle. The check removes its own object.
-Backend code can import `uploadObject`, `downloadObject`, `deleteObject`, and
-`signedDownloadUrl` from `web/storage.js`. Signed download URLs expire after
-15 minutes by default. Call `closeStorage` during shutdown.
-
-Keep credentials on the server. No public bucket access or browser upload
-endpoint is enabled by this integration. In production, configure these variables
-in the server environment.
-
-R2 Standard's monthly free allowance is 10 GB-month of storage, 1 million Class A
-operations, and 10 million Class B operations. Usage beyond that is billed;
-the free allowance is not a hard spending cap. See
-[Cloudflare R2 pricing](https://developers.cloudflare.com/r2/pricing/).
-
-## Redis and BullMQ
-
-Start Docker Desktop, then run `npm run redis:up` from the project root.
-This starts Redis on `127.0.0.1:6379`, with a persistent Docker volume,
-append-only persistence, and the `noeviction` policy required by BullMQ.
-Set `REDIS_URL=redis://127.0.0.1:6379` in `web/.env` (already configured locally).
-Run `npm run queue:check` to enqueue and process a temporary job, then clean it up.
-Use `npm run redis:stop` to stop Redis while keeping its data.
-
-If Docker Desktop is stuck starting and its engine returns HTTP 500, stop it
-with `docker desktop stop --force --timeout 30`. Wait for the Docker Desktop
-processes to exit, then run `wsl --terminate docker-desktop`. If
-`wsl --list --verbose` also lists `docker-desktop-data`, terminate that
-distribution too. Start Docker Desktop again, then run `npm run redis:up`
-and `npm run queue:check` to verify Redis and an actual BullMQ job. These
-steps keep the existing containers and persistent volumes.
-
-Import `createQueue` and `createWorker` from `web/queues.js` in backend code:
-
-```js
-import { createQueue, createWorker } from "./queues.js";
-
-const queue = createQueue("jobs");
-const worker = createWorker("jobs", async (job) => {
-  // Perform the background task here.
-  return { processed: job.id };
-});
-worker.on("error", (error) => console.error(error));
-await queue.add("example", { example: true });
-// On shutdown: await worker.close(); await queue.close();
-```
-
-Queue and worker factories use a `newmeta` prefix. The worker retries Redis
-connections indefinitely; producers have a bounded per-command retry count.
-Initial catalogue imports are reserved automatically when a merchant installs
-the app and dispatched immediately after the offline session commits. Keep the
-worker running alongside the HTTP app; its scanner recovers interrupted or
-unavailable queue dispatches. For an app running in another
-Docker Desktop container, use `redis://host.docker.internal:6379`; for a service
-on this Compose network, use `redis://redis:6379`. Set `REDIS_URL` separately in
-your production environment.
-
-## Database
-
-Shared configuration lives in `web/shared/env.js`, which loads `web/.env`
-without overriding deployment or Shopify CLI environment variables.
-`readEnvironment()` validates `DATABASE_URL`, optional `DIRECT_URL`, and
-`REDIS_URL`; errors identify variable names without disclosing their values.
-Callers can disable a required service using `{ requireDatabase: false }` or
-`{ requireRedis: false }` as the second argument. The shared database module
-re-exports the existing Prisma instance and lifecycle helpers. The shared Redis
-module provides producer and worker connection options, with `web/queues.js`
-preserving its existing public exports. Keep credentials in the environment,
-never in these shared source files.
-
-This project uses the Neon PostgreSQL database `newmeta` for Shopify sessions.
-The local connection string is in `web/.env` (ignored by Git). For another checkout,
-copy `web/.env.example` to `web/.env` and supply the connection string. In production,
-set `DATABASE_URL` in the server environment; it takes precedence over the local file.
-Use the pooled Neon connection URL with TLS enabled. The Shopify PostgreSQL adapter
-creates and migrates its session table automatically on startup.
-
-Install backend dependencies with `npm --prefix web install`, then start development
-with `npm run dev` from the project root. Existing local SQLite sessions are not copied;
-previously installed shops may need to authenticate again.
-
-This is a template for building a [Shopify app](https://shopify.dev/docs/apps/getting-started) using Node and React. It contains the basics for building a Shopify app.
-
-Rather than cloning this repo, you can use your preferred package manager and the Shopify CLI with [these steps](#installing-the-template).
-
-## Benefits
-
-Shopify apps are built on a variety of Shopify tools to create a great merchant experience. The [create an app](https://shopify.dev/docs/apps/getting-started/create) tutorial in our developer documentation will guide you through creating a Shopify app using this template.
-
-The Node app template comes with the following out-of-the-box functionality:
-
-- OAuth: Installing the app and granting permissions
-- GraphQL Admin API: Querying or mutating Shopify admin data
-- REST Admin API: Resource classes to interact with the API
-- Shopify-specific tooling:
-  - AppBridge
-  - Polaris
-  - Webhooks
-
-## Tech Stack
-
-This template combines a number of third party open-source tools:
-
-- [Express](https://expressjs.com/) builds the backend.
-- [Vite](https://vitejs.dev/) builds the [React](https://reactjs.org/) frontend.
-- [React Router](https://reactrouter.com/) is used for routing. We wrap this with file-based routing.
-- [React Query](https://react-query.tanstack.com/) queries the Admin API.
-- [`i18next`](https://www.i18next.com/) and related libraries are used to internationalize the frontend.
-  - [`react-i18next`](https://react.i18next.com/) is used for React-specific i18n functionality.
-  - [`i18next-resources-to-backend`](https://github.com/i18next/i18next-resources-to-backend) is used to dynamically load app translations.
-  - [`@formatjs/intl-localematcher`](https://formatjs.io/docs/polyfills/intl-localematcher/) is used to match the user locale with supported app locales.
-  - [`@formatjs/intl-locale`](https://formatjs.io/docs/polyfills/intl-locale) is used as a polyfill for [`Intl.Locale`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Intl/Locale) if necessary.
-  - [`@formatjs/intl-pluralrules`](https://formatjs.io/docs/polyfills/intl-pluralrules) is used as a polyfill for [`Intl.PluralRules`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Intl/PluralRules) if necessary.
-
-The following Shopify tools complement these third-party tools to ease app development:
-
-- [Shopify API library](https://github.com/Shopify/shopify-node-api) adds OAuth to the Express backend. This lets users install the app and grant scope permissions.
-- [App Bridge React](https://shopify.dev/docs/apps/tools/app-bridge/getting-started/using-react) adds [authentication to API requests](https://shopify.dev/docs/api/app-bridge-library/apis/resource-fetching) in the frontend and renders components outside of the App’s iFrame.
-- [Polaris React](https://polaris.shopify.com/) is a powerful design system and component library that helps developers build high quality, consistent experiences for Shopify merchants.
-- [File-based routing](https://github.com/Shopify/shopify-frontend-template-react/blob/main/Routes.jsx) makes creating new pages easier.
-- [`@shopify/i18next-shopify`](https://github.com/Shopify/i18next-shopify) is a plugin for [`i18next`](https://www.i18next.com/) that allows translation files to follow the same JSON schema used by Shopify [app extensions](https://shopify.dev/docs/apps/checkout/best-practices/localizing-ui-extensions#how-it-works) and [themes](https://shopify.dev/docs/themes/architecture/locales/storefront-locale-files#usage).
-
-## Getting started
-
-### Requirements
-
-1. You must [download and install Node.js](https://nodejs.org/en/download/) if you don't already have it.
-1. You must [create a Shopify partner account](https://partners.shopify.com/signup) if you don’t have one.
-1. You must create a store for testing if you don't have one, either a [development store](https://help.shopify.com/en/partners/dashboard/development-stores#create-a-development-store) or a [Shopify Plus sandbox store](https://help.shopify.com/en/partners/dashboard/managing-stores/plus-sandbox-store).
-
-### Installing the template
-
-This template can be installed using your preferred package manager:
-
-Using yarn:
-
-```shell
-yarn create @shopify/app --template=node
-```
-
-Using npm:
-
-```shell
-npm init @shopify/app@latest -- --template=node
-```
-
-Using pnpm:
-
-```shell
-pnpm create @shopify/app@latest --template=node
-```
-
-This will clone the template and install the required dependencies.
-
-#### Local Development
-
-[The Shopify CLI](https://shopify.dev/docs/apps/tools/cli) connects to an app in your Partners dashboard. It provides environment variables, runs commands in parallel, and updates application URLs for easier development.
-
-You can develop locally using your preferred package manager. Run one of the following commands from the root of your app.
-
-Using yarn:
-
-```shell
-yarn dev
-```
-
-Using npm:
-
-```shell
+```powershell
+npm ci
+npm --prefix web ci
+npm --prefix web/frontend ci
+npm run redis:up
 npm run dev
 ```
 
-Using pnpm:
+Shopify CLI supplies authentication configuration during development. For
+standalone hosting, configure `web/.env` using `web/.env.example`, build the
+frontend with `SHOPIFY_API_KEY` set, and run `npm --prefix web run serve`.
 
-```shell
-pnpm run dev
+For interface development without Redis, set `$env:REDIS_ENABLED = "false"`
+before `npm run dev`. Remove that override when Redis is available again.
+
+## Backend
+
+- `web/index.js`: starts Express and handles shutdown.
+- `web/app.js`: OAuth routes, signed webhooks, authenticated APIs, CSP and SPA serving.
+- `web/shopify.js`: official Shopify Express integration and Admin API version.
+- `web/privacy.js`: privacy hooks and uninstall/session cleanup.
+- `web/product-creator.js`: the template's five-product sample, updated for API 2026-10.
+- `web/template-tests`: HTTP and session regression tests.
+
+The official in-memory session adapter stores Shopify sessions independently of
+the application database. Sessions are lost on restart and are not shared across
+server instances. Select a persistent official Shopify session adapter before
+production hosting. SQLite's native package could not install on Windows ARM64,
+so the replacement does not depend on it.
+
+`GET /health` reports process health. `GET /api/products/count` reads the Shopify
+product count using the authenticated session. `POST /api/products` creates five
+sample products, as in the official template, and reports Shopify validation
+errors as failures. These endpoints require `read_products,write_products`;
+existing installations must approve the added write scope when running through
+Shopify CLI. Other `/api` endpoints return JSON 404 responses.
+Existing mirror, filters, ingestion, mutation gateway, queues,
+workers, Prisma schema and migrations have been removed. Frontend screens that
+used those APIs need new API wiring; their source and tests were retained.
+
+Existing databases and their data were not deleted. Private `.env` files
+are ignored. The prior
+custom backend source is recoverable from the ignored local archive
+`.shopify/legacy-backend-before-template.zip`.
+
+The backend immediately before this import is also saved locally at
+`.shopify/backend-before-upstream-20261027.zip`. The upstream checkout is in
+`.shopify/upstream-node-template`. Both are ignored by Git.
+
+Local adaptations retain the testable Express app factory, shutdown handling,
+health check, JSON API errors and uninstall cleanup. The obsolete REST resource
+import and unused example billing configuration are omitted. The upstream MIT
+license is retained in `web/TEMPLATE-LICENSE.md`.
+
+## Checks
+
+```powershell
+npm test
+npm --prefix web/frontend run test:ui
+npm --prefix web/frontend run test:products
 ```
 
-Open the URL generated in your console. Once you grant permission to the app, you can start development.
+CI installs with lockfiles and tests Node.js 22/24. No Prisma generation, database
+migration, background worker or storage bucket is required for the template tests.
 
-## Deployment
+## Local Redis
 
-### Application Storage
+On this Windows development machine, the native Memurai Developer service
+`MemuraiMetamax` provides Redis at `127.0.0.1:6380` and starts automatically.
+It binds only to localhost, persists data with AOF, and uses `noeviction`.
+Its configuration is `C:\ProgramData\Memurai\Metamax\memurai.conf`.
+When using this service, skip `redis:up` and `redis:stop`; check it with
+`Get-Service MemuraiMetamax` and `npm run redis:check`. Memurai Developer is
+for development/testing and requires restarting after ten days of uptime.
 
-This template uses [SQLite](https://www.sqlite.org/index.html) to store session data. The database is a file called `database.sqlite` which is automatically created in the root. This use of SQLite works in production if your app runs as a single instance.
+Run `npm run redis:up` to start the Redis service in `compose.yaml` and
+`npm run redis:check` to verify PING and a temporary SET/GET. Run
+`npm run redis:stop` to stop the service while retaining its data.
 
-The database that works best for you depends on the data your app needs and how it is queried. You can run your database of choice on a server yourself or host it with a SaaS company. Here’s a short list of databases providers that provide a free tier to get started:
+The backend connects through `web/db/redis.js` on development startup using
+`REDIS_URL=redis://127.0.0.1:6380`. This host port avoids the existing service on
+6379 and is bound to localhost only. Redis data persists in the Compose named
+volume with append-only persistence enabled. A backend inside the same Compose
+network should instead use `redis://redis:6379`. Production startup connects
+when REDIS_URL is explicitly configured. Shopify sessions still use the existing
+memory adapter; the Redis client is available for future backend features.
 
-| Database   | Type             | Hosters                                                                                                                                                                                                                               |
-| ---------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| MySQL      | SQL              | [Digital Ocean](https://www.digitalocean.com/try/managed-databases-mysql), [Planet Scale](https://planetscale.com/), [Amazon Aurora](https://aws.amazon.com/rds/aurora/), [Google Cloud SQL](https://cloud.google.com/sql/docs/mysql) |
-| PostgreSQL | SQL              | [Digital Ocean](https://www.digitalocean.com/try/managed-databases-postgresql), [Amazon Aurora](https://aws.amazon.com/rds/aurora/), [Google Cloud SQL](https://cloud.google.com/sql/docs/postgres)                                   |
-| Redis      | Key-value        | [Digital Ocean](https://www.digitalocean.com/try/managed-databases-redis), [Amazon MemoryDB](https://aws.amazon.com/memorydb/)                                                                                                        |
-| MongoDB    | NoSQL / Document | [Digital Ocean](https://www.digitalocean.com/try/managed-databases-mongodb), [MongoDB Atlas](https://www.mongodb.com/atlas/database)                                                                                                  |
+Official foundation: https://github.com/Shopify/shopify-app-template-node
 
-To use one of these, you need to change your session storage configuration. To help, here’s a list of [SessionStorage adapter packages](https://github.com/Shopify/shopify-api-js/blob/main/packages/shopify-api/docs/guides/session-storage.md).
+## Neon Postgres
 
-### Build
+The backend is connected to database `newmeta_app` in Neon project `newmeta`
+(`bitter-dream-29677040`), on development branch `express-backend-20261027`
+(`br-frosty-darkness-aod5t1wf`) in Singapore (`aws-ap-southeast-1`).
 
-The frontend is a single page app. It requires the `SHOPIFY_API_KEY`, which you can find on the page for your app in your partners dashboard. Paste your app’s key in the command for the package manager of your choice:
+`web/db/postgres.js` exports the shared `database` pool. The backend verifies the
+connection on startup when `DATABASE_URL` is set and closes it on shutdown.
+The pooled URL is stored only in ignored `web/.env`, with TLS certificate
+verification enabled. Run `npm run db:check` to verify a live read-only query.
 
-Using yarn:
+The new database has no application tables yet. The empty Prisma placeholders
+remain available for later schema work; no ORM or migrations are configured.
 
-```shell
-cd web/frontend/ && SHOPIFY_API_KEY=REPLACE_ME yarn build
-```
+## Durable catalog imports
 
-Using npm:
+The current source includes the mirror schema and Prisma migration history;
+the earlier empty-database description above is historical. Apply migrations
+through `web/prisma.config.mjs` before starting the backend. In particular,
+`20261029000000_catalog_import_jobs` installs the durable import queue.
 
-```shell
-cd web/frontend/ && SHOPIFY_API_KEY=REPLACE_ME npm run build
-```
+Authenticated merchants can queue an import with `POST /api/mirror/sync`, inspect
+`GET /api/mirror/sync/:id`, and cancel with `POST /api/mirror/sync/:id/cancel`.
+Installation now automatically queues the initial mirror import after verified
+OAuth, before redirecting into the app. Repeated callbacks reuse the installation's
+durable request. A startup scanner resumes pending installation scheduling, and
+the authenticated mirror-status request repairs an interrupted first enqueue.
+Uninstall fences old work; reinstall starts a fresh request after its cleanup.
+See [automatic installation syncing](docs/install-mirror-sync-20261029.md).
+The startup worker streams the Shopify export, resumes durable checkpoints,
+reconciles current products and publishes verified coverage. It requires an
+offline session with product-read access. See
+[the catalog import contract](docs/catalog-import-20261029.md) for deployment,
+retry, cancellation and verification details.
 
-Using pnpm:
-
-```shell
-cd web/frontend/ && SHOPIFY_API_KEY=REPLACE_ME pnpm run build
-```
-
-You do not need to build the backend.
-
-## Hosting
-
-When you're ready to set up your app in production, you can follow [our deployment documentation](https://shopify.dev/docs/apps/deployment/web) to host your app on a cloud provider like [Heroku](https://www.heroku.com/) or [Fly.io](https://fly.io/).
-
-When you reach the step for [setting up environment variables](https://shopify.dev/docs/apps/deployment/web#set-env-vars), you also need to set the variable `NODE_ENV=production`.
-
-## Known issues
-
-### Hot module replacement and Firefox
-
-When running the app with the CLI in development mode on Firefox, you might see your app constantly reloading when you access it.
-That happened in previous versions of the CLI, because of the way HMR websocket requests work.
-
-We fixed this issue with v3.4.0 of the CLI, so after updating it, you can make the following changes to your app's `web/frontend/vite.config.js` file:
-
-1. Change the definition `hmrConfig` object to be:
-
-   ```js
-   const host = process.env.HOST
-     ? process.env.HOST.replace(/https?:\/\//, "")
-     : "localhost";
-
-   let hmrConfig;
-   if (host === "localhost") {
-     hmrConfig = {
-       protocol: "ws",
-       host: "localhost",
-       port: 64999,
-       clientPort: 64999,
-     };
-   } else {
-     hmrConfig = {
-       protocol: "wss",
-       host: host,
-       port: process.env.FRONTEND_PORT,
-       clientPort: 443,
-     };
-   }
-   ```
-
-1. Change the `server.host` setting in the configs to `"localhost"`:
-
-   ```js
-   server: {
-     host: "localhost",
-     ...
-   ```
-
-### I can't get past the ngrok "Visit site" page
-
-When you’re previewing your app or extension, you might see an ngrok interstitial page with a warning:
-
-```text
-You are about to visit <id>.ngrok.io: Visit Site
-```
-
-If you click the `Visit Site` button, but continue to see this page, then you should run dev using an alternate tunnel URL that you run using tunneling software.
-We've validated that [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/run-tunnel/trycloudflare/) works with this template.
-
-To do that, you can [install the `cloudflared` CLI tool](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/installation/), and run:
-
-```shell
-# Note that you can also use a different port
-cloudflared tunnel --url http://localhost:3000
-```
-
-Out of the logs produced by cloudflare you will notice a https URL where the domain ends with `trycloudflare.com`. This is your tunnel URL. You need to copy this URL as you will need it in the next step.
-
-```shell
-2022-11-11T19:57:55Z INF Requesting new quick Tunnel on trycloudflare.com...
-2022-11-11T19:57:58Z INF +--------------------------------------------------------------------------------------------+
-2022-11-11T19:57:58Z INF |  Your quick Tunnel has been created! Visit it at (it may take some time to be reachable):  |
-2022-11-11T19:57:58Z INF |  https://randomly-generated-hostname.trycloudflare.com                                     |
-2022-11-11T19:57:58Z INF +--------------------------------------------------------------------------------------------+
-```
-
-Below you would replace `randomly-generated-hostname` with what you have copied from the terminal. In a different terminal window, navigate to your app's root and with the URL from above you would call:
-
-```shell
-# Using yarn
-yarn dev --tunnel-url https://randomly-generated-hostname.trycloudflare.com:3000
-# or using npm
-npm run dev --tunnel-url https://randomly-generated-hostname.trycloudflare.com:3000
-# or using pnpm
-pnpm dev --tunnel-url https://randomly-generated-hostname.trycloudflare.com:3000
-```
-
-## Developer resources
-
-- [Introduction to Shopify apps](https://shopify.dev/docs/apps/getting-started)
-- [App authentication](https://shopify.dev/docs/apps/auth)
-- [Shopify CLI](https://shopify.dev/docs/apps/tools/cli)
-- [Shopify API Library documentation](https://github.com/Shopify/shopify-api-js#readme)
-- [Getting started with internationalizing your app](https://shopify.dev/docs/apps/best-practices/internationalization/getting-started)
-  - [i18next](https://www.i18next.com/)
-    - [Configuration options](https://www.i18next.com/overview/configuration-options)
-  - [react-i18next](https://react.i18next.com/)
-    - [`useTranslation` hook](https://react.i18next.com/latest/usetranslation-hook)
-    - [`Trans` component usage with components array](https://react.i18next.com/latest/trans-component#alternative-usage-components-array)
-  - [i18n-ally VS Code extension](https://marketplace.visualstudio.com/items?itemName=Lokalise.i18n-ally)

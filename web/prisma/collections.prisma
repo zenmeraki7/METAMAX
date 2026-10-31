@@ -1,0 +1,32 @@
+// METAMAX collections domain. Loaded through prisma.config.mjs.
+
+model SnapshotCollection {
+  id           BigInt                 @id @default(autoincrement())
+  shopId       String                 @map("shop_id") @db.Text
+  generationId String                 @map("generation_id") @db.Text
+  shopifyId    String                 @map("shopify_id") @db.Text
+  title        String                 @db.Text
+  handle       String                 @db.Text
+  updatedAt    DateTime               @map("updated_at") @db.Timestamptz(3)
+  generation   MirrorGeneration       @relation(fields: [shopId, generationId], references: [shopId, id], onDelete: Cascade)
+  products     CollectionMembership[]
+
+  @@unique([shopId, generationId, shopifyId])
+  @@unique([shopId, generationId, id])
+  @@map("collections")
+  @@schema("mirror")
+}
+
+model CollectionMembership {
+  shopId       String             @map("shop_id") @db.Text
+  generationId String             @map("generation_id") @db.Text
+  productId    BigInt             @map("product_id")
+  collectionId BigInt             @map("collection_id")
+  product      SnapshotProduct    @relation(fields: [shopId, generationId, productId], references: [shopId, generationId, id], onDelete: Cascade)
+  collection   SnapshotCollection @relation(fields: [shopId, generationId, collectionId], references: [shopId, generationId, id], onDelete: Cascade)
+
+  @@id([shopId, generationId, collectionId, productId])
+  @@index([shopId, generationId, productId])
+  @@map("product_collections")
+  @@schema("mirror")
+}

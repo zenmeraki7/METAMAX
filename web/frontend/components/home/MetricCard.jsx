@@ -1,57 +1,21 @@
-export function MetricCard({ metric }) {
-  const toneClass = metric.tone ? `home-icon-square--${metric.tone}` : "";
-
+export default function MetricCard({ metric }) {
   return (
-    <s-box
-      border="base"
-      borderRadius="base"
-      padding="base"
-      background="base"
-    >
-      <s-stack
-        direction="inline"
+    <s-box border="base" borderRadius="base" padding="base" background="base">
+      <s-grid
+        gridTemplateColumns="auto minmax(0, 1fr)"
         gap="base"
         alignItems="center"
       >
-        <div className={`home-icon-square ${toneClass}`}>
+        <s-box padding="small" background="subdued" borderRadius="base">
           <s-icon type={metric.icon || "chart-vertical"} />
-        </div>
-
-        <s-stack
-          gap="extra-tight"
-          style={{ minWidth: 0, flex: 1 }}
-        >
-          <s-text color="subdued">
-            {metric.label}
-          </s-text>
-
-          <s-text
-            fontWeight="bold"
-            style={{ fontSize: "1.3rem", lineHeight: 1.2 }}
-          >
-            {metric.value}
-          </s-text>
-
-          {metric.isLive ? (
-            <s-stack
-              direction="inline"
-              gap="extra-tight"
-              alignItems="center"
-            >
-              <span className="home-live-dot" aria-hidden="true" />
-              <s-text color="subdued">
-                {metric.subtext}
-              </s-text>
-            </s-stack>
-          ) : (
-            <s-text color="subdued">
-              {metric.subtext}
-            </s-text>
-          )}
+        </s-box>
+        <s-stack gap="small">
+          <s-text color="subdued">{metric.label}</s-text>
+          <s-heading>{metric.value}</s-heading>
+          <s-text color="subdued">{metric.subtext}</s-text>
         </s-stack>
-      </s-stack>
+      </s-grid>
     </s-box>
   );
 }
-
-export default MetricCard;
+export { MetricCard };

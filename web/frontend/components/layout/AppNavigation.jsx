@@ -6,11 +6,7 @@ export default function AppNavigation() {
 
       <s-link href={routes.products}>Products</s-link>
 
-      <s-link href={routes.bulkEdit}>Bulk edit</s-link>
-
       <s-link href={routes.savedViews}>Saved views</s-link>
-
-      <s-link href={routes.catalogSync}>Catalog sync</s-link>
 
       <s-link href={routes.automations}>Automations</s-link>
 

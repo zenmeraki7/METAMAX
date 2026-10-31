@@ -1,0 +1,98 @@
+// METAMAX fields domain. Loaded together through prisma.config.mjs.
+
+enum OwnerEntity {
+  product
+  variant
+
+  @@schema("mirror")
+}
+
+// Stored approvals of mappings are inputs for trusted backend review, never raw
+// browser-supplied SQL. The compiler still verifies the code registry and catalog.
+model FieldMapping {
+  shopId          String           @map("shop_id") @db.Text
+  generationId    String           @map("generation_id") @db.Text
+  fieldId         String           @map("field_id") @db.Text
+  mappingVersion  String           @map("mapping_version") @db.Text
+  entity          String           @db.Text
+  columnName      String           @map("column_name") @db.Text
+  storageType     String           @map("storage_type") @db.Text
+  definitionToken String?          @map("definition_token") @db.Text
+  verifiedAt      DateTime         @map("verified_at") @db.Timestamptz(3)
+  generation      MirrorGeneration @relation(fields: [shopId, generationId], references: [shopId, id], onDelete: Cascade)
+
+  @@id([shopId, generationId, fieldId])
+  @@map("field_mappings")
+  @@schema("mirror")
+}
+
+model MetafieldDefinition {
+  id                    BigInt           @id @default(autoincrement())
+  shopId                String           @map("shop_id") @db.Text
+  fieldId               String           @map("field_id") @db.Text
+  shopifyDefinitionId   String           @map("shopify_definition_id") @db.Text
+  locatorId             String           @map("locator_id") @db.Text
+  ownerEntity           OwnerEntity      @map("owner_entity")
+  namespace             String           @db.Text
+  key                   String           @db.Text
+  shopifyType           String           @map("shopify_type") @db.Text
+  canonicalType         String           @map("canonical_type") @db.Text
+  label                 String           @db.Text
+  definitionToken       String           @map("definition_token") @db.Text
+  status                String           @default("UNVERIFIED") @db.Text
+  definitionVerified    Boolean          @default(false) @map("definition_verified")
+  nullable              Boolean          @default(true)
+  writable              Boolean          @default(false)
+  mutationSupported     Boolean          @default(false) @map("mutation_supported")
+  readerAdapterId       String?          @map("reader_adapter_id") @db.Text
+  writerAdapterId       String?          @map("writer_adapter_id") @db.Text
+  precision             Int?
+  scale                 Int?
+  constraints           Json?            @db.JsonB
+  verifiedAt            DateTime?        @map("verified_at") @db.Timestamptz(3)
+  verificationExpiresAt DateTime?        @map("verification_expires_at") @db.Timestamptz(3)
+  merchant              Shop             @relation(fields: [shopId], references: [id], onDelete: Restrict)
+  values                MetafieldValue[]
+
+  @@unique([shopId, id, ownerEntity])
+  @@unique([shopId, fieldId])
+  @@unique([shopId, shopifyDefinitionId])
+  @@unique([shopId, locatorId])
+  @@unique([shopId, ownerEntity, namespace, key])
+  @@map("metafield_definitions")
+  @@schema("mirror")
+}
+
+// Exactly one owner FK and exactly one typed representation are enforced by the
+// migration. Missing fields have no row; isNull represents an explicit null.
+// Definition verification never grants read/write authorization.
+model MetafieldValue {
+  id              BigInt              @id @default(autoincrement())
+  shopId          String              @map("shop_id") @db.Text
+  generationId    String              @map("generation_id") @db.Text
+  productId       BigInt?             @map("product_id")
+  variantId       BigInt?             @map("variant_id")
+  definitionId    BigInt              @map("definition_id")
+  ownerEntity     OwnerEntity         @map("owner_entity")
+  definitionToken String              @map("definition_token") @db.Text
+  valueType       String              @map("value_type") @db.Text
+  isNull          Boolean             @default(false) @map("is_null")
+  textValue       String?             @map("text_value") @db.Text
+  booleanValue    Boolean?            @map("boolean_value")
+  integerValue    BigInt?             @map("integer_value")
+  decimalValue    Decimal?            @map("decimal_value") @db.Decimal
+  dateValue       DateTime?           @map("date_value") @db.Date
+  datetimeValue   DateTime?           @map("datetime_value") @db.Timestamptz(6)
+  stringListValue String[]            @default([]) @map("string_list_value")
+  jsonValue       Json?               @map("json_value") @db.JsonB
+  product         SnapshotProduct?    @relation(fields: [shopId, generationId, productId], references: [shopId, generationId, id], onDelete: Cascade)
+  variant         SnapshotVariant?    @relation(fields: [shopId, generationId, variantId], references: [shopId, generationId, id], onDelete: Cascade)
+  definition      MetafieldDefinition @relation(fields: [shopId, definitionId, ownerEntity], references: [shopId, id, ownerEntity], onDelete: Restrict)
+
+  @@unique([shopId, generationId, productId, definitionId])
+  @@unique([shopId, generationId, variantId, definitionId])
+  // Additional typed indexes belong to reviewed query workloads, not every type.
+  @@index([shopId, generationId, definitionId, id])
+  @@map("metafield_values")
+  @@schema("mirror")
+}

@@ -1,0 +1,163 @@
+model CatalogImportJob {
+  id                   String                  @id @db.Text
+  shopId               String                  @map("shop_id") @db.Text
+  installationVersion  String                  @map("installation_version") @db.Text
+  status               String                  @default("QUEUED") @db.Text
+  executionMode        String                  @default("LEGACY") @map("execution_mode") @db.Text
+  generationId         String?                 @map("generation_id") @db.Text
+  runId                BigInt?                 @map("run_id")
+  expectedGenerationId String?                 @map("expected_generation_id") @db.Text
+  attempts             Int                     @default(0)
+  fence                BigInt                  @default(0)
+  leaseUntil           DateTime?               @map("lease_until") @db.Timestamptz(3)
+  nextAttemptAt        DateTime                @default(now()) @map("next_attempt_at") @db.Timestamptz(3)
+  cancelRequested      Boolean                 @default(false) @map("cancel_requested")
+  lastError            String?                 @map("last_error") @db.Text
+  createdAt            DateTime                @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt            DateTime                @default(now()) @map("updated_at") @db.Timestamptz(3)
+  shop                 Shop                    @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  execution            CatalogImportExecution?
+
+  @@unique([shopId, id, generationId], map: "catalog_import_execution_identity")
+  @@index([status, nextAttemptAt, leaseUntil], map: "catalog_import_due")
+  @@map("catalog_import_jobs")
+  @@schema("mirror")
+}
+
+// One-to-one extension of the existing queue record. This is the sole execution
+// lease for PHASE jobs; ingestion_runs contains only subordinate ingestion state.
+model CatalogImportExecution {
+  id                String                  @id @db.Text
+  shopId            String                  @map("shop_id") @db.Text
+  generationId      String                  @map("generation_id") @db.Text
+  phase             String                  @default("STARTING") @db.Text
+  attempt           Int                     @default(0)
+  fence             BigInt                  @default(0)
+  leaseToken        String?                 @map("lease_token") @db.Text
+  leaseUntil        DateTime?               @map("lease_until") @db.Timestamptz(3)
+  workerId          String?                 @map("worker_id") @db.Text
+  nextEligibleAt    DateTime?               @map("next_eligible_at") @db.Timestamptz(3)
+  completedAt       DateTime?               @map("completed_at") @db.Timestamptz(3)
+  reviewRequired    Boolean                 @default(false) @map("review_required")
+  recoveryAttempts  Int                     @default(0) @map("recovery_attempts")
+  deliveryRevision  BigInt                  @default(0) @map("delivery_revision")
+  cancelCompletedAt DateTime?               @map("cancel_completed_at") @db.Timestamptz(3)
+  outcomeUncertain  Boolean                 @default(false) @map("outcome_uncertain")
+  cancelRequested   Boolean                 @default(false) @map("cancel_requested")
+  lastError         String?                 @map("last_error") @db.Text
+  job               CatalogImportJob        @relation(fields: [shopId, id, generationId], references: [shopId, id, generationId], onDelete: Restrict, onUpdate: Restrict, map: "catalog_execution_job")
+  shop              Shop                    @relation(fields: [shopId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  generation        MirrorGeneration        @relation(fields: [shopId, generationId], references: [shopId, id], onDelete: Restrict, onUpdate: Restrict, map: "catalog_execution_generation")
+  ingestions        SyncRun[]
+  operations        SyncExternalOperation[]
+  deliveries        SyncDispatchDelivery[]
+  recoveryEvidence  SyncDispatchRecoveryEvidence[]
+
+  @@unique([shopId, id, generationId], map: "catalog_execution_identity")
+  @@index([shopId, leaseUntil], map: "catalog_execution_shop_lease")
+  @@index([nextEligibleAt, id], map: "catalog_execution_due")
+  @@map("catalog_import_executions")
+  @@schema("mirror")
+}
+
+model SyncDispatchShop {
+  shopId           String    @id @map("shop_id") @db.Text
+  lastServed       BigInt    @default(0) @map("last_served")
+  lastDispatchedAt DateTime? @map("last_dispatched_at") @db.Timestamptz(3)
+  nextEligibleAt   DateTime  @default(now()) @map("next_eligible_at") @db.Timestamptz(3)
+  shop             Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "sync_dispatch_schedule_shop_fk")
+
+  @@index([nextEligibleAt, lastDispatchedAt, shopId], map: "sync_dispatch_schedule_due_idx")
+  @@map("sync_dispatch_schedule")
+  @@schema("mirror")
+}
+
+model SyncDispatchDelivery {
+  id                String                 @id @db.Text
+  shopId            String                 @map("shop_id") @db.Text
+  runId             String                 @map("run_id") @db.Text
+  generationId      String                 @map("generation_id") @db.Text
+  deliveryRevision  BigInt                 @map("delivery_revision")
+  kind              String                 @db.Text
+  deliveryKey       String                 @unique @map("delivery_key") @db.Text
+  state             String                 @default("PENDING") @db.Text
+  dispatchToken     String                 @map("dispatch_token") @db.Text
+  reservationFence  BigInt                 @map("reservation_fence")
+  reservedUntil     DateTime?              @map("reserved_until") @db.Timestamptz(3)
+  nextAttemptAt     DateTime               @default(now()) @map("next_attempt_at") @db.Timestamptz(3)
+  attempt           Int                    @default(0)
+  enqueuedAt        DateTime?              @map("enqueued_at") @db.Timestamptz(3)
+  recoveryToken     String?                @map("recovery_token") @db.Text
+  recoveryUntil     DateTime?              @map("recovery_until") @db.Timestamptz(3)
+  recoveryReason    String?                @map("recovery_reason") @db.Text
+  consumedAt        DateTime?              @map("consumed_at") @db.Timestamptz(3)
+  consumedFence     BigInt?                @map("consumed_fence")
+  consumedLeaseToken String?               @map("consumed_lease_token") @db.Text
+  recoveryFence     BigInt                 @default(0) @map("recovery_fence")
+  reviewedAt        DateTime?              @map("reviewed_at") @db.Timestamptz(3)
+  ingestionRunId    BigInt                 @map("sync_run_id")
+  jobId             String?                @map("job_id") @db.Text
+  lastErrorCode     String?                @map("last_error_code") @db.Text
+  createdAt         DateTime               @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime               @default(now()) @map("updated_at") @db.Timestamptz(3)
+  execution         CatalogImportExecution @relation(fields: [shopId, runId, generationId], references: [shopId, id, generationId], onDelete: Restrict, onUpdate: Restrict, map: "sync_dispatches_execution_fk")
+  ingestion         SyncRun                @relation(fields: [shopId, ingestionRunId], references: [shopId, id], onDelete: Restrict, onUpdate: Restrict, map: "sync_dispatches_sync_run_fk")
+  shop              Shop                   @relation(fields: [shopId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "sync_dispatches_shop_fk")
+  recoveryEvidence  SyncDispatchRecoveryEvidence[]
+
+  @@unique([shopId, runId, deliveryRevision, kind], map: "sync_dispatches_logical_delivery_unique")
+  @@unique([shopId, deliveryKey], map: "sync_dispatches_delivery_unique")
+  @@index([reservedUntil, id], map: "sync_dispatch_expiry")
+  @@index([shopId, runId, createdAt], map: "sync_dispatches_run_idx")
+  @@map("sync_dispatches")
+  @@schema("mirror")
+}
+
+model SyncExternalOperation {
+  id            String                 @id @db.Text
+  shopId        String                 @map("shop_id") @db.Text
+  runId         String                 @map("run_id") @db.Text
+  generationId  String                 @map("generation_id") @db.Text
+  kind          String                 @db.Text
+  inputHash     String                 @map("input_hash") @db.Text
+  state         String                 @db.Text
+  dispatchFence BigInt                 @map("dispatch_fence")
+  operationId   String?                @map("operation_id") @db.Text
+  remoteStatus  String?                @map("remote_status") @db.Text
+  objectCount   BigInt?                @map("object_count")
+  lastError     String?                @map("last_error") @db.Text
+  createdAt     DateTime               @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime               @default(now()) @map("updated_at") @db.Timestamptz(3)
+  execution     CatalogImportExecution @relation(fields: [shopId, runId, generationId], references: [shopId, id, generationId], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([runId, kind])
+  @@map("sync_external_operations")
+  @@schema("mirror")
+}
+
+model SyncDispatchRecoveryEvidence {
+  id               String                 @id @db.Text
+  dispatchId       String                 @map("dispatch_id") @db.Text
+  shopId           String                 @map("shop_id") @db.Text
+  runId            String                 @map("run_id") @db.Text
+  generationId     String                 @map("generation_id") @db.Text
+  deliveryRevision BigInt                 @map("delivery_revision")
+  kind             String                 @db.Text
+  deliveryKey      String                 @map("delivery_key") @db.Text
+  recoveryToken    String                 @map("recovery_token") @db.Text
+  recoveryFence    BigInt                 @map("recovery_fence")
+  decision         String                 @db.Text
+  queueState       String                 @map("queue_state") @db.Text
+  jobId            String                 @map("job_id") @db.Text
+  observedAt       DateTime               @default(dbgenerated("clock_timestamp()")) @map("observed_at") @db.Timestamptz(3)
+  expiresAt        DateTime               @map("expires_at") @db.Timestamptz(3)
+  consumedAt       DateTime?              @map("consumed_at") @db.Timestamptz(3)
+  dispatch         SyncDispatchDelivery   @relation(fields: [dispatchId], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "sync_dispatch_recovery_evidence_dispatch_fk")
+  execution        CatalogImportExecution @relation(fields: [shopId, runId, generationId], references: [shopId, id, generationId], onDelete: Restrict, onUpdate: Restrict, map: "sync_dispatch_recovery_evidence_execution_fk")
+  shop             Shop                   @relation(fields: [shopId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "sync_dispatch_recovery_evidence_shop_fk")
+
+  @@unique([dispatchId, recoveryFence], map: "sync_dispatch_recovery_evidence_fence_unique")
+  @@index([dispatchId, recoveryFence, expiresAt], map: "sync_dispatch_recovery_evidence_lookup_idx")
+  @@map("sync_dispatch_recovery_evidence")
+  @@schema("mirror")
+}

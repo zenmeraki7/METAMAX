@@ -1,5 +1,4 @@
 import { GraphqlQueryError } from "@shopify/shopify-api";
-import shopify from "./shopify.js";
 
 const ADJECTIVES = [
   "autumn",
@@ -70,17 +69,22 @@ const NOUNS = [
 ];
 
 export const DEFAULT_PRODUCTS_COUNT = 5;
-const CREATE_PRODUCTS_MUTATION = `
-  mutation populateProduct($input: ProductInput!) {
-    productCreate(input: $input) {
+export const CREATE_PRODUCTS_MUTATION = `
+  mutation populateProduct($product: ProductCreateInput!) {
+    productCreate(product: $product) {
       product {
         id
+      }
+      userErrors {
+        field
+        message
       }
     }
   }
 `;
 
 export default async function productCreator(
+  shopify,
   session,
   count = DEFAULT_PRODUCTS_COUNT
 ) {
@@ -88,13 +92,20 @@ export default async function productCreator(
 
   try {
     for (let i = 0; i < count; i++) {
-      await client.request(CREATE_PRODUCTS_MUTATION, {
+      const result = await client.request(CREATE_PRODUCTS_MUTATION, {
         variables: {
-          input: {
+          product: {
             title: `${randomTitle()}`,
           },
         },
       });
+      const payload = result.data?.productCreate;
+      if (payload?.userErrors?.length) {
+        throw new Error(payload.userErrors.map(({ message }) => message).join("; "));
+      }
+      if (!payload?.product?.id) {
+        throw new Error("Shopify did not return a created product");
+      }
     }
   } catch (error) {
     if (error instanceof GraphqlQueryError) {

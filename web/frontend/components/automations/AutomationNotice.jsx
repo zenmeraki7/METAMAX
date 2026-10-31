@@ -1,12 +1,8 @@
 export default function AutomationNotice({ onDismiss }) {
   return (
-    <s-banner
-      tone="info"
-      dismissible
-      onDismiss={onDismiss}
-    >
-      Automations run continuously in the background even when you close the app.
-      Review execution logs anytime in History.
+    <s-banner tone="info" dismissible ondismiss={onDismiss}>
+      These are example automations. Configuring a template here does not start
+      a live background job.
     </s-banner>
   );
 }

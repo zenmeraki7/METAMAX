@@ -49,19 +49,15 @@ export default function ProductsInsights({ summary }) {
     <s-query-container>
       <s-grid
         accessibilityLabel="Catalog overview"
-        gridTemplateColumns="@container (inline-size > 700px) 1fr 1fr 1fr, @container (inline-size > 420px) 1fr 1fr, 1fr"
+        gridTemplateColumns="@container (inline-size > 420px) '1fr 1fr', (inline-size > 700px) '1fr 1fr 1fr', '1fr'"
         gap="base"
       >
         {METRICS.map(({ key, label }) => (
           <s-grid-item key={key}>
             <s-section heading={label}>
-              <s-text
-                type="strong"
-                fontSize="large-100"
-                fontVariantNumeric="tabular-nums"
-              >
+              <s-heading>
                 {formatCount(summary?.[key])}
-              </s-text>
+              </s-heading>
             </s-section>
           </s-grid-item>
         ))}

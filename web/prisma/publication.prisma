@@ -1,0 +1,112 @@
+// METAMAX publication domain. Loaded together through prisma.config.mjs.
+
+enum GenerationStatus {
+  INGESTING
+  RECONCILING
+  VERIFIED
+  PUBLISHED
+  RETIRED
+  FAILED
+
+  @@schema("mirror")
+}
+
+enum CoverageStatus {
+  PENDING
+  INGESTING
+  COMPLETE
+  FAILED
+
+  @@schema("mirror")
+}
+
+model MirrorGeneration {
+  exportJobs ExportJob[]
+  exportManifestJobs ExportManifestJob[]
+  // Opaque text generation token matches coverage/cursor contracts.
+  shopId                String                      @map("shop_id") @db.Text
+  id                    String                      @default(uuid()) @db.Text
+  status                GenerationStatus            @default(INGESTING)
+  coverageRevision      String                      @default(uuid()) @map("coverage_revision") @db.Text
+  mirrorSchemaVersion   String                      @map("mirror_schema_version") @db.Text
+  sourceContractVersion String                      @map("source_contract_version") @db.Text
+  mappingVersion        String                      @map("mapping_version") @db.Text
+  createdAt             DateTime                    @default(now()) @map("created_at") @db.Timestamptz(3)
+  verifiedAt            DateTime?                   @map("verified_at") @db.Timestamptz(3)
+  publishedAt           DateTime?                   @map("published_at") @db.Timestamptz(3)
+  retiredAt             DateTime?                   @map("retired_at") @db.Timestamptz(3)
+  retainUntil           DateTime?                   @map("retain_until") @db.Timestamptz(3)
+  merchant              Shop                        @relation(fields: [shopId], references: [id], onDelete: Restrict)
+  publications          MirrorPublication[]
+  requiredDatasets      String[]                    @default(["products", "variants"]) @map("required_datasets")
+  datasets              MirrorCoverage[]
+  ingestions            SyncRun[]
+  catalogExecutions     CatalogImportExecution[]
+  products              SnapshotProduct[]
+  inventoryItems        InventoryItem[]
+  locations             Location[]
+  collections           SnapshotCollection[]
+  categories            Category[]
+  mappings              FieldMapping[]
+  selections            SelectionSnapshot[]
+  productRevisions      GenerationProductRevision[]
+  leases                GenerationReadLease[]
+
+  @@id([shopId, id])
+  @@unique([shopId, id, coverageRevision, mappingVersion])
+  @@index([shopId, status, createdAt])
+  @@map("generations")
+  @@schema("mirror")
+}
+
+// One current publication per shop. This relation is also the coarse lock barrier.
+// Every publisher, mutator and reclaimer MUST take lockForWrite in its transaction.
+model MirrorPublication {
+  shopId           String           @id @map("shop_id") @db.Text
+  generationId     String           @map("generation_id") @db.Text
+  coverageRevision String           @map("coverage_revision") @db.Text
+  mappingVersion   String           @map("mapping_version") @db.Text
+  publishedAt      DateTime         @default(now()) @map("published_at") @db.Timestamptz(3)
+  generation       MirrorGeneration @relation(fields: [shopId, generationId, coverageRevision, mappingVersion], references: [shopId, id, coverageRevision, mappingVersion], onDelete: Restrict, onUpdate: Restrict)
+
+  @@map("publications")
+  @@schema("mirror")
+}
+
+model MirrorCoverage {
+  shopId           String           @map("shop_id") @db.Text
+  generationId     String           @map("generation_id") @db.Text
+  name             String           @db.Text
+  status           CoverageStatus   @default(PENDING)
+  durableRows      BigInt           @default(0) @map("durable_rows")
+  verifiedAt       DateTime?        @map("verified_at") @db.Timestamptz(3)
+  verificationHash String?          @map("verification_hash") @db.Text
+  generation       MirrorGeneration @relation(fields: [shopId, generationId], references: [shopId, id], onDelete: Cascade)
+
+  @@id([shopId, generationId, name])
+  @@map("coverage")
+  @@schema("mirror")
+}
+
+// Durable read leases prevent cleanup of snapshots required by active pagination,
+// approved selections, or unfinished jobs.
+model GenerationReadLease {
+  shopId           String           @map("shop_id") @db.Text
+  id               String           @default(uuid()) @db.Text
+  generationId     String           @map("generation_id") @db.Text
+  coverageRevision String           @map("coverage_revision") @db.Text
+  mappingVersion   String           @map("mapping_version") @db.Text
+  operation        String           @db.Text
+  owner            String           @db.Text
+  expiresAt        DateTime         @map("expires_at") @db.Timestamptz(3)
+  createdAt        DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  generation       MirrorGeneration @relation(fields: [shopId, generationId, coverageRevision, mappingVersion], references: [shopId, id, coverageRevision, mappingVersion], onDelete: Restrict, onUpdate: Restrict)
+  exportManifestJobs ExportManifestJob[]
+
+  @@id([shopId, id])
+  @@index([shopId, expiresAt])
+  @@index([shopId, generationId, expiresAt])
+  @@index([shopId, operation, owner])
+  @@map("generation_read_leases")
+  @@schema("mirror")
+}

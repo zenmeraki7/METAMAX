@@ -10,12 +10,8 @@ export default function AutomationTemplateCard({ template, onUse }) {
     template.category === "recurring" ? "Schedule" : "Event rule";
 
   return (
-    <div className="ma-template-card">
-      <s-stack
-        gap="small"
-        justifyContent="space-between"
-        style={{ height: "100%" }}
-      >
+    <s-box border="base" borderRadius="base" background="base" padding="base">
+      <s-stack gap="small" justifyContent="space-between">
         <s-stack gap="small">
           <s-stack
             direction="inline"
@@ -34,19 +30,14 @@ export default function AutomationTemplateCard({ template, onUse }) {
             </s-badge>
           </s-stack>
 
-          <s-paragraph color="subdued">
-            {template.description}
-          </s-paragraph>
+          <s-paragraph color="subdued">{template.description}</s-paragraph>
         </s-stack>
 
-        <s-button
-          variant="secondary"
-          onClick={() => onUse(template)}
-        >
+        <s-button variant="secondary" onClick={() => onUse(template)}>
           Use template
         </s-button>
       </s-stack>
-    </div>
+    </s-box>
   );
 }
 

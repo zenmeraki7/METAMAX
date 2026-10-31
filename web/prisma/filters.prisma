@@ -1,0 +1,19 @@
+// METAMAX filters domain. Loaded together through prisma.config.mjs.
+
+// A reusable semantic recipe, never a persisted authorization grant. Validate
+// the AST through the configured Field/Filter services on every use.
+model SavedFilter {
+  shopId      String   @map("shop_id") @db.Text
+  id          String   @default(uuid()) @db.Text
+  name        String   @db.Text
+  astVersion  Int      @map("ast_version")
+  ast         Json     @db.JsonB
+  // Structural fingerprint only; always re-resolve/authorize before compilation.
+  fingerprint String   @db.Text
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  merchant    Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  @@id([shopId, id])
+  @@map("saved_filters")
+  @@schema("mirror")
+}

@@ -32,49 +32,43 @@ export function QuickActions() {
   return (
     <section aria-label="Primary actions">
       <s-grid
-        gridTemplateColumns="@container (inline-size > 800px) repeat(3, minmax(0, 1fr)), 1fr"
+        gridTemplateColumns="@container (inline-size > 800px) 'repeat(3, minmax(0, 1fr))', '1fr'"
         gap="base"
       >
         {quickActions.map((action) => (
-          <Link
-            key={action.id}
-            to={action.href}
-            className="home-action-card"
-          >
+          <Link key={action.id} to={action.href} className="home-action-card">
             <s-box
               border="base"
               borderRadius="base"
               padding="base"
               background="base"
             >
-              <s-stack
-                direction="inline"
+              <s-grid
+                gridTemplateColumns="minmax(0, 1fr) auto"
                 alignItems="center"
-                justifyContent="space-between"
                 gap="base"
               >
-                <s-stack
-                  direction="inline"
+                <s-grid
+                  gridTemplateColumns="auto minmax(0, 1fr)"
                   alignItems="center"
                   gap="base"
-                  style={{ minWidth: 0, flex: 1 }}
                 >
-                  <div className={`home-icon-square home-icon-square--${action.tone}`}>
+                  <s-box
+                    padding="small"
+                    background="subdued"
+                    borderRadius="base"
+                  >
                     <s-icon type={action.icon} />
-                  </div>
+                  </s-box>
 
-                  <s-stack gap="extra-tight" style={{ minWidth: 0 }}>
-                    <s-text fontWeight="bold">
-                      {action.title}
-                    </s-text>
-                    <s-text color="subdued">
-                      {action.subtitle}
-                    </s-text>
+                  <s-stack gap="small">
+                    <s-text type="strong">{action.title}</s-text>
+                    <s-text color="subdued">{action.subtitle}</s-text>
                   </s-stack>
-                </s-stack>
+                </s-grid>
 
                 <s-icon type="chevron-right" />
-              </s-stack>
+              </s-grid>
             </s-box>
           </Link>
         ))}

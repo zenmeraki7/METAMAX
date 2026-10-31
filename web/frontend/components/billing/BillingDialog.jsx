@@ -29,7 +29,7 @@ export default function BillingDialog({
 
                 <s-grid
                   class="pb-dialog__features"
-                  gridTemplateColumns="@container (inline-size > 900px) 1fr, @container (inline-size > 600px) 1fr 1fr, 1fr"
+                  gridTemplateColumns="@container (inline-size > 600px) '1fr 1fr', (inline-size > 900px) '1fr', '1fr'"
                   gap="base"
                 >
                   {dialog.plan.features.map((feature) => (

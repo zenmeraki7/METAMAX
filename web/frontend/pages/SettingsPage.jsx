@@ -5,7 +5,6 @@ import SettingsHelp from "../components/settings/SettingsHelp.jsx";
 import SettingsHelpDialog from "../components/settings/SettingsHelpDialog.jsx";
 import useSettingsDashboard from "../hooks/useSettingsDashboard.js";
 import { settingsSections } from "../data/settings.js";
-import "../styles/settings.css";
 export default function SettingsPage() {
   const dashboard = useSettingsDashboard();
   return (
@@ -27,7 +26,7 @@ export default function SettingsPage() {
         <s-stack class="ms-content" gap="base">
           <s-grid
             class="ms-layout"
-            gridTemplateColumns="@container (inline-size > 900px) minmax(0, 1.72fr) minmax(0, 1fr), @container (inline-size > 600px) 1fr 1fr, 1fr"
+            gridTemplateColumns="@container (inline-size > 600px) '1fr 1fr', (inline-size > 900px) 'minmax(0, 1.72fr) minmax(0, 1fr)', '1fr'"
             gap="base"
           >
             <s-stack class="ms-main-column" gap="base">

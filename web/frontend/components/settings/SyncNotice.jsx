@@ -15,7 +15,6 @@ export default function SyncNotice({ onDismiss }) {
       tone="info"
       heading="Your Shopify data is synced and stored securely"
       dismissible
-      onDismiss={onDismiss}
     >
       <s-paragraph>
         To speed up searches and edits, the app maintains a synced copy of your

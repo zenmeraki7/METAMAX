@@ -1,0 +1,132 @@
+// METAMAX synchronization domain. Loaded together through prisma.config.mjs.
+
+model SyncRun {
+  id               BigInt                  @id @default(autoincrement())
+  shopId           String                  @map("shop_id") @db.Text
+  generationId     String                  @map("generation_id") @db.Text
+  dataset          String                  @db.Text
+  status           WorkStatus              @default(PENDING)
+  bulkOperationId  String?                 @map("bulk_operation_id") @db.Text
+  expectedLines    BigInt?                 @map("expected_lines")
+  // Increment only with validated, committed COPY/staging writes, never on read.
+  processedLines   BigInt                  @default(0) @map("processed_lines")
+  invalidLines     BigInt                  @default(0) @map("invalid_lines")
+  eofVerified      Boolean                 @default(false) @map("eof_verified")
+  writesFinishedAt DateTime?               @map("writes_finished_at") @db.Timestamptz(3)
+  leaseToken       String?                 @map("lease_token") @db.Text
+  leaseUntil       DateTime?               @map("lease_until") @db.Timestamptz(3)
+  fence            BigInt                  @default(0)
+  executionId      String?                 @map("execution_id") @db.Text
+  executionFence   BigInt?                 @map("execution_fence")
+  execution        CatalogImportExecution? @relation(fields: [shopId, executionId, generationId], references: [shopId, id, generationId], onDelete: Restrict, onUpdate: Restrict, map: "ingestion_execution_scope")
+  lastError        String?                 @map("last_error") @db.Text
+  createdAt        DateTime                @default(now()) @map("created_at") @db.Timestamptz(3)
+  generation       MirrorGeneration        @relation(fields: [shopId, generationId], references: [shopId, id], onDelete: Cascade)
+  chunks           SyncCheckpoint[]
+  journal          MutationJournal[]
+  dispatches       SyncDispatchDelivery[]
+
+  @@unique([shopId, id])
+  @@unique([shopId, generationId, dataset])
+  @@map("ingestion_runs")
+  @@schema("mirror")
+}
+
+// Bounded JSONL chunks are staging/checkpoint metadata, not duplicated catalogs.
+// Chunk checkpoint + mirror writes + durable counts commit in one transaction.
+model SyncCheckpoint {
+  id          BigInt   @id @default(autoincrement())
+  shopId      String   @map("shop_id") @db.Text
+  runId       BigInt   @map("run_id")
+  ordinal     Int
+  checksum    String   @db.Text
+  lineCount   BigInt   @map("line_count")
+  committedAt DateTime @default(now()) @map("committed_at") @db.Timestamptz(3)
+  run         SyncRun  @relation(fields: [shopId, runId], references: [shopId, id], onDelete: Cascade)
+
+  @@unique([shopId, runId, ordinal])
+  @@map("ingestion_chunks")
+  @@schema("mirror")
+}
+
+model CatalogChange {
+  shopId              String                      @map("shop_id") @db.Text
+  productId           String                      @map("product_id") @db.Text
+  revision            BigInt                      @default(1)
+  appliedRevision     BigInt                      @default(0) @map("applied_revision")
+  dirty               Boolean                     @default(true)
+  deleted             Boolean                     @default(false)
+  attempts            Int                         @default(0)
+  nextAttemptAt       DateTime?                   @map("next_attempt_at") @db.Timestamptz(3)
+  deadLetterAt        DateTime?                   @map("dead_letter_at") @db.Timestamptz(3)
+  lastError           String?                     @map("last_error") @db.Text
+  leaseToken          String?                     @map("lease_token") @db.Text
+  leaseUntil          DateTime?                   @map("lease_until") @db.Timestamptz(3)
+  fence               BigInt                      @default(0)
+  updatedAt           DateTime                    @updatedAt @map("updated_at") @db.Timestamptz(3)
+  merchant            Shop                        @relation(fields: [shopId], references: [id], onDelete: Restrict)
+  journal             MutationJournal[]
+  generationRevisions GenerationProductRevision[]
+
+  @@id([shopId, productId])
+  // Due-dirty scanner uses the partial index in constraints.sql.
+  @@map("catalog_changes")
+  @@schema("mirror")
+}
+
+// Compact durable intent/history. CatalogChange remains the latest revision and
+// retry cursor; journal records survive queue removal and duplicate delivery.
+model MutationJournal {
+  id          BigInt        @id @default(autoincrement())
+  shopId      String        @map("shop_id") @db.Text
+  productId   String        @map("product_id") @db.Text
+  revision    BigInt
+  sourceKey   String        @map("source_key") @db.Text
+  source      String        @db.Text
+  deleted     Boolean       @default(false)
+  syncRunId   BigInt?       @map("sync_run_id")
+  payloadHash String?       @map("payload_hash") @db.Text
+  recordedAt  DateTime      @default(now()) @map("recorded_at") @db.Timestamptz(3)
+  appliedAt   DateTime?     @map("applied_at") @db.Timestamptz(3)
+  purgeAfter  DateTime?     @map("purge_after") @db.Timestamptz(3)
+  change      CatalogChange @relation(fields: [shopId, productId], references: [shopId, productId], onDelete: Restrict)
+  syncRun     SyncRun?      @relation(fields: [shopId, syncRunId], references: [shopId, id], onDelete: Restrict)
+
+  @@unique([shopId, sourceKey])
+  @@unique([shopId, productId, revision])
+  @@map("mutation_journal")
+  @@schema("mirror")
+}
+
+model WebhookReceipt {
+  id          BigInt    @id @default(autoincrement())
+  shopId      String    @map("shop_id") @db.Text
+  eventId     String    @map("event_id") @db.Text
+  topic       String    @db.Text
+  payloadHash String    @map("payload_hash") @db.Text
+  receivedAt  DateTime  @default(now()) @map("received_at") @db.Timestamptz(3)
+  processedAt DateTime? @map("processed_at") @db.Timestamptz(3)
+  merchant    Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  @@unique([shopId, eventId])
+  @@map("webhook_receipts")
+  @@schema("mirror")
+}
+
+model GenerationProductRevision {
+  shopId       String @map("shop_id") @db.Text
+  generationId String @map("generation_id") @db.Text
+  productId    String @map("product_id") @db.Text
+
+  revision BigInt
+  deleted  Boolean @default(false)
+
+  appliedAt DateTime @default(now()) @map("applied_at") @db.Timestamptz(3)
+
+  generation MirrorGeneration @relation(fields: [shopId, generationId], references: [shopId, id], onDelete: Cascade)
+  change     CatalogChange    @relation(fields: [shopId, productId], references: [shopId, productId], onDelete: Cascade)
+
+  @@id([shopId, generationId, productId])
+  @@map("generation_product_revisions")
+  @@schema("mirror")
+}

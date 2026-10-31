@@ -1,0 +1,57 @@
+// METAMAX execution domain. Loaded together through prisma.config.mjs.
+
+enum ApprovalStatus {
+  DRAFT
+  APPROVED
+  REVOKED
+  EXPIRED
+
+  @@schema("mirror")
+}
+
+model SelectionSnapshot {
+  importPreviews ImportPreview[]
+  exportJobs ExportJob[]
+  scheduleOccurrences ScheduleOccurrence[]
+  shopId              String            @map("shop_id") @db.Text
+  id                  String            @default(uuid()) @db.Text
+  generationId        String            @map("generation_id") @db.Text
+  coverageRevision    String            @map("coverage_revision") @db.Text
+  mappingVersion      String            @map("mapping_version") @db.Text
+  operation           String            @db.Text
+  operationId         String            @map("operation_id") @db.Text
+  status              ApprovalStatus    @default(DRAFT)
+  filterAst           Json              @map("filter_ast") @db.JsonB
+  filterFingerprint   String            @map("filter_fingerprint") @db.Text
+  registryVersion     String            @map("registry_version") @db.Text
+  definitionRevisions Json              @map("definition_revisions") @db.JsonB
+  selectedCount       BigInt            @default(0) @map("selected_count")
+  selectionHash       String?           @map("selection_hash") @db.Text
+  frozenAt            DateTime?         @map("frozen_at") @db.Timestamptz(3)
+  expiresAt           DateTime          @map("expires_at") @db.Timestamptz(3)
+  createdAt           DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+  generation          MirrorGeneration  @relation(fields: [shopId, generationId, coverageRevision, mappingVersion], references: [shopId, id, coverageRevision, mappingVersion], onDelete: Restrict, onUpdate: Restrict)
+  items               SelectionItem[]
+  contracts           PreviewContract[]
+
+  @@id([shopId, id])
+  @@unique([shopId, id, generationId])
+  @@index([shopId, expiresAt])
+  @@map("selection_snapshots")
+  @@schema("mirror")
+}
+
+// Resolve all-matching + exclusions server-side, materialize once, then freeze.
+model SelectionItem {
+  id           BigInt            @id @default(autoincrement())
+  shopId       String            @map("shop_id") @db.Text
+  snapshotId   String            @map("snapshot_id") @db.Text
+  generationId String            @map("generation_id") @db.Text
+  productId    BigInt            @map("product_id")
+  snapshot     SelectionSnapshot @relation(fields: [shopId, snapshotId, generationId], references: [shopId, id, generationId], onDelete: Cascade)
+  product      SnapshotProduct   @relation(fields: [shopId, generationId, productId], references: [shopId, generationId, id], onDelete: Restrict)
+
+  @@unique([shopId, snapshotId, productId])
+  @@map("selection_items")
+  @@schema("mirror")
+}

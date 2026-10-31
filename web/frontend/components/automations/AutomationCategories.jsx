@@ -3,7 +3,10 @@ import { automationCategories } from "../../data/automations.demo.js";
 
 export default function AutomationCategories({ counts }) {
   return (
-    <div className="ma-categories-grid">
+    <s-grid
+      gridTemplateColumns="@container (inline-size > 768px) 'repeat(2, minmax(0, 1fr))', '1fr'"
+      gap="base"
+    >
       {automationCategories.map((category) => (
         <AutomationCategoryCard
           key={category.id}
@@ -11,7 +14,7 @@ export default function AutomationCategories({ counts }) {
           activeCount={counts?.[category.id] ?? 0}
         />
       ))}
-    </div>
+    </s-grid>
   );
 }
 

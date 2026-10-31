@@ -10,19 +10,12 @@ export default function AutomationCategoryCard({ category, activeCount }) {
   const ActionIcon = icons[category.actionIcon] ?? "calendar";
 
   return (
-    <s-section heading={category.title} style={{ height: "100%" }}>
-      <s-badge
-        slot="accessory"
-        tone={activeCount > 0 ? "success" : "neutral"}
-      >
+    <s-section heading={category.title}>
+      <s-badge slot="accessory" tone={activeCount > 0 ? "success" : "neutral"}>
         {activeCount} active
       </s-badge>
 
-      <s-stack
-        gap="small"
-        justifyContent="space-between"
-        style={{ height: "100%" }}
-      >
+      <s-stack gap="small" justifyContent="space-between">
         <s-paragraph color="subdued">{category.description}</s-paragraph>
 
         <s-stack
@@ -31,7 +24,7 @@ export default function AutomationCategoryCard({ category, activeCount }) {
           alignItems="center"
           justifyContent="space-between"
         >
-          <s-stack direction="inline" gap="small" alignItems="center" style={{ minWidth: 0, flex: "1 1 auto" }}>
+          <s-stack direction="inline" gap="small" alignItems="center">
             <s-icon type={ActionIcon} />
             <s-text color="subdued">
               <s-text type="strong">{category.actionTitle}: </s-text>
@@ -39,11 +32,7 @@ export default function AutomationCategoryCard({ category, activeCount }) {
             </s-text>
           </s-stack>
 
-          <s-button
-            variant="secondary"
-            href={category.path}
-            style={{ flexShrink: 0 }}
-          >
+          <s-button variant="secondary" href={category.path}>
             Configure
           </s-button>
         </s-stack>

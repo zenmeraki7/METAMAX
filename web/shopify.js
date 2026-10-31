@@ -1,35 +1,28 @@
-import { BillingInterval } from "@shopify/shopify-api";
+import "dotenv/config";
 import { shopifyApp } from "@shopify/shopify-app-express";
-import { sessionStorage } from "./session-storage.js";
+import { PostgreSQLSessionStorage } from "@shopify/shopify-app-session-storage-postgresql";
 
-// The transactions with Shopify will always be marked as test transactions, unless NODE_ENV is production.
-// See the ensureBilling helper to learn more about billing in this template.
-const billingConfig = {
-  "My Shopify One-Time Charge": {
-    // This is an example configuration that would do a one-time charge for $5 (only USD is currently supported)
-    amount: 5.0,
-    currencyCode: "USD",
-    interval: BillingInterval.OneTime,
-  },
-};
+// Ensure SSL mode is enabled for remote PostgreSQL connections (e.g. Neon)
+if (process.env.DATABASE_URL && !process.env.PGSSLMODE) {
+  try {
+    const url = new URL(process.env.DATABASE_URL);
+    const sslmode = url.searchParams.get("sslmode");
+    if (sslmode) {
+      process.env.PGSSLMODE = sslmode;
+    } else if (url.hostname !== "localhost" && url.hostname !== "127.0.0.1") {
+      process.env.PGSSLMODE = "require";
+    }
+  } catch {
+    process.env.PGSSLMODE = "require";
+  }
+}
+
+const sessionStorage = new PostgreSQLSessionStorage(process.env.DATABASE_URL);
 
 const shopify = shopifyApp({
-  api: {
-    apiVersion: "2026-10",
-    future: {
-      customerAddressDefaultFix: true,
-      lineItemBilling: true,
-      unstable_managedPricingSupport: true,
-    },
-    billing: undefined, // or replace with billingConfig above to enable example billing
-  },
-  auth: {
-    path: "/api/auth",
-    callbackPath: "/api/auth/callback",
-  },
-  webhooks: {
-    path: "/api/webhooks",
-  },
+  api: { apiVersion: "2026-10", billing: undefined },
+  auth: { path: "/api/auth", callbackPath: "/api/auth/callback" },
+  webhooks: { path: "/api/webhooks" },
   sessionStorage,
 });
 

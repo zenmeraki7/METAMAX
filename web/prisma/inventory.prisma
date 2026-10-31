@@ -1,0 +1,59 @@
+// METAMAX inventory domain. Loaded through prisma.config.mjs.
+
+model InventoryItem {
+  id                   BigInt            @id @default(autoincrement())
+  shopId               String            @map("shop_id") @db.Text
+  generationId         String            @map("generation_id") @db.Text
+  shopifyId            String            @map("shopify_id") @db.Text
+  sku                  String?           @db.Text
+  tracked              Boolean
+  requiresShipping     Boolean           @map("requires_shipping")
+  unitCost             Decimal?          @map("unit_cost") @db.Decimal
+  currencyCode         String?           @map("currency_code") @db.Text
+  countryCodeOfOrigin  String?           @map("country_code_of_origin") @db.Text
+  harmonizedSystemCode String?           @map("harmonized_system_code") @db.Text
+  generation           MirrorGeneration  @relation(fields: [shopId, generationId], references: [shopId, id], onDelete: Cascade)
+  variants             SnapshotVariant[]
+  levels               InventoryLevel[]
+
+  @@unique([shopId, generationId, shopifyId])
+  @@unique([shopId, generationId, id])
+  @@map("inventory_items")
+  @@schema("mirror")
+}
+
+model Location {
+  id           BigInt           @id @default(autoincrement())
+  shopId       String           @map("shop_id") @db.Text
+  generationId String           @map("generation_id") @db.Text
+  shopifyId    String           @map("shopify_id") @db.Text
+  name         String           @db.Text
+  active       Boolean
+  generation   MirrorGeneration @relation(fields: [shopId, generationId], references: [shopId, id], onDelete: Cascade)
+  levels       InventoryLevel[]
+
+  @@unique([shopId, generationId, shopifyId])
+  @@unique([shopId, generationId, id])
+  @@map("locations")
+  @@schema("mirror")
+}
+
+model InventoryLevel {
+  id              BigInt        @id @default(autoincrement())
+  shopId          String        @map("shop_id") @db.Text
+  generationId    String        @map("generation_id") @db.Text
+  shopifyId       String        @map("shopify_id") @db.Text
+  inventoryItemId BigInt        @map("inventory_item_id")
+  locationId      BigInt        @map("location_id")
+  available       BigInt
+  onHand          BigInt        @map("on_hand")
+  committed       BigInt
+  incoming        BigInt
+  inventoryItem   InventoryItem @relation(fields: [shopId, generationId, inventoryItemId], references: [shopId, generationId, id], onDelete: Cascade)
+  location        Location      @relation(fields: [shopId, generationId, locationId], references: [shopId, generationId, id], onDelete: Restrict)
+
+  @@unique([shopId, generationId, shopifyId])
+  @@unique([shopId, generationId, inventoryItemId, locationId])
+  @@map("inventory_levels")
+  @@schema("mirror")
+}

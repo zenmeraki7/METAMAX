@@ -29,6 +29,10 @@ export default function HomePage() {
         </s-menu>
 
         <s-stack gap="base">
+          <s-banner tone="info">
+            Dashboard metrics and recent activity are examples. Open Products to
+            view your synced catalog.
+          </s-banner>
           <MetricsGrid metrics={demoMetrics} />
 
           <HomeHeroSearch />
@@ -36,7 +40,7 @@ export default function HomePage() {
           <QuickActions />
 
           <s-grid
-            gridTemplateColumns="@container (inline-size > 860px) minmax(0, 1.35fr) minmax(0, 1fr), 1fr"
+            gridTemplateColumns="@container (inline-size > 860px) 'minmax(0, 1.35fr) minmax(0, 1fr)', '1fr'"
             gap="base"
           >
             <TutorialCard onOpen={tutorial.open} />
@@ -45,10 +49,7 @@ export default function HomePage() {
         </s-stack>
       </s-page>
 
-      <TutorialDialog
-        dialogRef={tutorial.dialogRef}
-        onClose={tutorial.close}
-      />
+      <TutorialDialog dialogRef={tutorial.dialogRef} onClose={tutorial.close} />
     </>
   );
 }

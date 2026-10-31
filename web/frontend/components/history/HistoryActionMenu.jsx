@@ -3,7 +3,9 @@ import { useId } from "react";
 export default function HistoryActionMenu({ item, onView, onCopy, onRetry }) {
   const menuId = useId();
   const canRetry =
-    (item.status === "Failed" || item.status === "Cancelled") &&
+    (item.status === "Failed" ||
+      item.status === "Cancelled" ||
+      item.status === "Expired") &&
     Boolean(onRetry);
   const items = [
     {

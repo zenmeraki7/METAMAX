@@ -1,34 +1,55 @@
-export { FIELD_TYPES, FIELD_LIMITS, FieldError, isFieldType, getFieldType, requireFieldType, listFieldTypes, isComparableType, isSortableType, isSearchableType } from "./types.js";
-export {
-  CANONICAL_FIELDS, FIELD_CONTRACT_VERSION, SHOPIFY_FIELD_API_VERSION,
-  INVENTORY_FIELD_QUANTITIES, listFields, getCanonicalField, requireCanonicalField,
-} from "./canonical.js";
-export {
-  FIELD_OPERATIONS, EDIT_OPERATIONS, FieldOperationError, getEditOperation, listEditOperations,
-  listFieldOperations, supportsFieldOperation, requireFieldOperation, validateEditOperation, requireValidEditOperation,
-} from "./operations.js";
-export { normalizeFieldValue, FieldNormalizationError, normalizeValue as normalizeTypedValue } from "./normalize.js";
-export { normalizeOperand, validateChange, assertValidChange, assertValidChanges } from "./operations.js";
-import { isFieldType } from "./types.js";
-import { normalizeValue as normalizeType } from "./normalize.js";
-import { requireValidFieldValue } from "./validate.js";
-// Compatibility for existing field-ID callers; new callers should use the explicit APIs.
-export function normalizeValue(typeOrField, value) {
-  return isFieldType(typeOrField) ? normalizeType(typeOrField, value) :
-    requireValidFieldValue(typeOrField, value, { purpose: "read" });
-}
-export {
-  CAPABILITIES, getCapabilities, getFieldCapabilities, hasFieldCapability, requireFieldCapability,
-  listFieldsByCapability, listFieldCapabilities, checkFieldAvailability, assertFieldCapability,
-} from "./capabilities.js";
-export {
-  resolveField, requireResolvedField, listResolvedFields, resolveSource, resolveFieldValue,
-  makeMetafieldId, parseMetafieldId, createMetafieldRegistry, METAFIELD_OWNERS, FieldResolutionError,
-} from "./resolve.js";
-export {
-  DATASETS, getFieldSource, requireFieldSource, listFieldSources,
-  listDatasetFields, requiredDatasets, checkSourceCoverage,
-} from "./sources.js";
-export { validateValue, validateFieldValue, requireValidFieldValue, validateFieldValues, FieldValidationError } from "./validate.js";
+/**
+ * METAMAX — Field Engine Public API
+ *
+ * Only stable, supported interfaces belong here. Internal implementations
+ * remain available through explicit server-only imports.
+ * Low-level normalizers require trusted descriptors and constraints; HTTP
+ * controllers must never forward request-supplied field objects to them.
+ */
 
-export { checkMetafieldAccess } from "./metafields.js";
+// Canonical field registry
+export {
+  CANONICAL_FIELD_COUNT,
+  CANONICAL_REGISTRY_INFO,
+  getCanonicalField,
+  requireCanonicalField,
+  listCanonicalFields,
+} from "./canonical.js";
+
+// Canonical type definitions
+export {
+  FIELD_TYPES,
+  FIELD_ERROR_CODES,
+  FieldError,
+  isFieldType,
+  isNumericType,
+  isSortableType,
+} from "./types.js";
+
+// Reusable normalization
+export {
+  normalizeFieldValue,
+  normalizeOperatorOperand,
+} from "./normalize.js";
+
+// Trusted field constraints
+export {
+  POLICY_CONTEXT,
+  WRITE_OPERATIONS,
+  WRITE_OPERAND_KIND,
+  WRITE_OPERATION_OPERANDS,
+  normalizeWriteOperand,
+  validateFinalWriteValue,
+  getFieldConstraints,
+  getFieldPolicy,
+  assertFieldWriteOperation,
+  listFieldWriteOperations,
+  getFieldClearResult,
+} from "./constraints.js";
+
+// Authorized field service
+export {
+  FIELD_ACCESS,
+  FIELD_ORIGINS,
+  createFieldService,
+} from "./resolve.js";

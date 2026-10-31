@@ -171,13 +171,75 @@ export const demoHistory = [
     "Aug 12 at 4:05 PM", "2m 45s",
     "Store Manager"
   ),
+  operation(
+    "op-025", "Restore product prices (Undo op-001)", "Undo",
+    "Completed", 14987, 14987,
+    "2026-10-25T10:15:00+05:30",
+    "Oct 25 at 10:15 AM", "1m 45s"
+  ),
+  operation(
+    "op-026", "Full catalog synchronization", "Sync",
+    "Running", 6200, 14987,
+    "2026-10-25T11:00:00+05:30",
+    "Just now", "In progress..."
+  ),
+  operation(
+    "op-027", "Nightly scheduled price adjustment", "Automation",
+    "Queued", 0, 14987,
+    "2026-10-25T11:05:00+05:30",
+    "Queued", "0s"
+  ),
+  operation(
+    "op-028", "Bulk update product status", "Edit",
+    "Pending", 0, 8500,
+    "2026-10-25T11:04:00+05:30",
+    "Pending claim", "0s"
+  ),
+  operation(
+    "op-029", "Export product variants to XLSX", "Export",
+    "Retrying", 1200, 12430,
+    "2026-10-25T10:50:00+05:30",
+    "Retrying attempt 2/5", "1m 10s"
+  ),
+  operation(
+    "op-030", "Export products JSONL", "Export",
+    "Expired", 5000, 14987,
+    "2026-10-20T08:00:00+05:30",
+    "Oct 20 at 8:00 AM", "Lease expired"
+  ),
 ];
+
+export const HISTORY_STATUS_OPTIONS = Object.freeze([
+  "All",
+  "Running",
+  "Queued",
+  "Pending",
+  "Retrying",
+  "Completed",
+  "Cancelled",
+  "Failed",
+  "Expired",
+]);
+
+export const HISTORY_TYPE_OPTIONS = Object.freeze([
+  "All",
+  "Edit",
+  "Undo",
+  "Export",
+  "Import",
+  "Sync",
+  "Automation",
+  "File",
+]);
 
 export const HISTORY_TABS = [
   { id: "All", label: "All" },
   { id: "Edit", label: "Edits" },
+  { id: "Undo", label: "Undos" },
   { id: "Export", label: "Exports" },
   { id: "Import", label: "Imports" },
+  { id: "Sync", label: "Syncs" },
+  { id: "Automation", label: "Automations" },
   { id: "File", label: "Files" },
 ];
 

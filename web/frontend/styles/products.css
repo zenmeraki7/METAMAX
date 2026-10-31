@@ -1,1 +1,46 @@
 /* Layout and spacing use Polaris web component properties. */
+.products-toolbar-top {
+  display: grid;
+  grid-template-columns: 130px minmax(180px, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+.products-toolbar-actions,
+.products-toolbar-chips {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+.products-toolbar-filters {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+.products-toolbar-match {
+  width: 185px;
+  flex-shrink: 0;
+}
+.products-field-list {
+  display: grid;
+  gap: 4px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+@media (max-width: 650px) {
+  .products-toolbar-top {
+    grid-template-columns: 110px minmax(0, 1fr);
+  }
+  .products-toolbar-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-end;
+  }
+  .products-toolbar-filters {
+    flex-wrap: wrap;
+  }
+  .products-toolbar-match {
+    margin-left: auto;
+  }
+}
