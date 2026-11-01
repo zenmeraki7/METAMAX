@@ -6,7 +6,7 @@ import { createSyncRunDbAdapter, verifySyncRunDbMapping } from "../sync-run-db-a
 import { CATALOG_EXECUTION_MAPPING, createCatalogEvidenceValidators, createCatalogSyncRunDbAdapter } from "../catalog-execution.server.js";
 import { CATALOG_INPUT_HASH } from "../catalog-sync-steps.server.js";
 
-export async function testSyncRecoveryRepository(t,{pool,fixture,service,runtime,state,makeDue,drain}) {
+export async function testSyncRecoveryRepository(t,{pool,fixture,service,runtime,state,makeDue,drain,processJob}) {
   const mapping=await verifySyncRunDbMapping({database:pool,mapping:CATALOG_EXECUTION_MAPPING});
   const core=createSyncRunRepository({db:createSyncRunDbAdapter({database:pool,mapping,...createCatalogEvidenceValidators()})});
   const approved=new Set();
@@ -19,7 +19,7 @@ export async function testSyncRecoveryRepository(t,{pool,fixture,service,runtime
   const park=id=>pool.query(`UPDATE mirror.catalog_import_executions SET review_required=true,lease_token=NULL,lease_until=NULL,worker_id=NULL,next_eligible_at=NULL WHERE id=$1`,[id]);
   async function seed(name,{start=true}={}) {
     const s=fixture(name),job=await service.enqueue(s.session);
-    if(start)await runtime.processOne();
+    if(start)await processJob(job.id);
     await pool.query(`UPDATE mirror.catalog_import_executions SET outcome_uncertain=true,next_eligible_at=clock_timestamp() WHERE id=$1`,[job.id]);
     return {s,job};
   }
@@ -161,7 +161,11 @@ export async function testSyncRecoveryRepository(t,{pool,fixture,service,runtime
   await t.test("recovery refuses gaps and uncommitted line counts in the exact product SyncRun",async()=>{
     for (const [suffix,ordinal,processed] of [['gap',1,'1'],['count',0,'0']]) {
       const s=fixture(`recovery-checkpoint-${suffix}`),job=await service.enqueue(s.session);
-      await runtime.processOne();await runtime.processOne();
+      // Staged downloads may require additional durable WAITING checkpoints.
+      for(let step=0;step<8;step++){
+        await makeDue(job.id);await processJob(job.id);
+        if((await state(job.id)).phase==='INGESTING')break;
+      }
       assert.equal((await state(job.id)).phase,'INGESTING');
       const ordinary=await core.claimRun({runId:job.id,workerId:'checkpoint-fixture',leaseSeconds:120});
       const run=(await pool.query('SELECT * FROM mirror.ingestion_runs WHERE execution_id=$1',[job.id])).rows[0];
@@ -185,7 +189,7 @@ export async function testSyncRecoveryRepository(t,{pool,fixture,service,runtime
       assert.equal((await repo.finishRecovery({claim:c,verification:proof(c)})).kind,"STALE_CLAIM");
       assert.equal((await repo.recordRecoveryFailure({claim:c,reason:"VERIFICATION_FAILED"})).kind,"STALE_CLAIM");
       assert.equal((await state(job.id)).outcome_uncertain,true);
-      await runtime.processOne();assert.equal((await state(job.id)).cancel_requested,true);
+      await processJob(job.id);assert.equal((await state(job.id)).cancel_requested,true);
     }
   });
 }

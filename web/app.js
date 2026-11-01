@@ -109,11 +109,13 @@ export function createApp({ shopify, staticPath, filterRuntime = null, catalogIm
       const session=await authentication.authenticateSession(req);
       if(!session)return res.status(401).json({error:'UNAUTHENTICATED'});
       if(!hasCurrentProductWrite(session))return res.status(403).json({error:'PRODUCT_WRITE_PERMISSION_DENIED'});
-      await productCreator(shopify, session);
+      if(!catalogImportService?.withEditingLock)return res.status(503).json({success:false,error:'CATALOG_EDITING_LOCKED'});
+      await catalogImportService.withEditingLock(session,()=>productCreator(shopify, session));
       res.status(200).json({ success: true, error: null });
     } catch (error) {
       console.error("[app] Failed to create sample products:", error.name || "Error");
-      res.status(500).json({ success: false, error: "Failed to create sample products" });
+      const status=error.code==='UNAUTHENTICATED'?401:error.code==='IMPORT_PERMISSION_DENIED'?403:error.code==='CATALOG_IMPORT_UNAVAILABLE'?503:500;
+      res.status(status).json({success:false,error:status===503?'CATALOG_EDITING_LOCKED':status===401?'UNAUTHENTICATED':status===403?'PRODUCT_WRITE_PERMISSION_DENIED':'Failed to create sample products'});
     }
   });
   // Removed engine APIs must never receive an HTML SPA response or fake records.

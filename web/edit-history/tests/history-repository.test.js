@@ -1,3 +1,4 @@
+import {lockPublication} from '../../mirror/publication-lock.server.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHistoryRepository } from '../history-repository.server.js';
@@ -83,4 +84,20 @@ test('a timed-out callback cannot keep using a released transaction client',asyn
  const invoke=createHistoryHookInvoker({async query(){queries++;return {rows:[]};}},{budgetMs:100,hookMs:20});
  await assert.rejects(()=>invoke(({client})=>{retained=client;return new Promise(()=>{});},{}),{code:'HISTORY_OWNERSHIP_LOST'});
  await assert.rejects(()=>retained.query('SELECT 1'),{code:'HISTORY_OWNERSHIP_LOST'});assert.equal(queries,0);
+});
+
+
+test('history publication capability locks only its captured tenant and expires with the callback',async()=>{
+ const statements=[];let retained;
+ const invoke=createHistoryHookInvoker({async query(sql,values){statements.push({sql,values});return{rows:[]};}});
+ const tenant={shopId:'a.myshopify.com'};
+ await invoke(async({client,tenant:mutable})=>{
+  retained=client;await lockPublication(client,'a.myshopify.com');
+  mutable.shopId='b.myshopify.com';
+  await assert.rejects(()=>lockPublication(client,'b.myshopify.com'),{code:'HISTORY_UNAUTHORIZED'});
+  await assert.rejects(()=>lockPublication(client,'a.myshopify.com',{write:true}),{code:'HISTORY_UNAUTHORIZED'});
+  await assert.rejects(()=>client.query('LOCK TABLE mirror.products IN ACCESS SHARE MODE'),{code:'HISTORY_UNAUTHORIZED'});
+ },{tenant});
+ assert.equal(statements.length,3);assert.match(statements[0].sql,/LOCK TABLE "mirror"."publications" IN ACCESS SHARE MODE/);
+ await assert.rejects(()=>lockPublication(retained,'a.myshopify.com'),{code:'HISTORY_OWNERSHIP_LOST'});assert.equal(statements.length,3);
 });

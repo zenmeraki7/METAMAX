@@ -71,7 +71,7 @@ export async function testCatalogImports(t, pool) {
   let service = makeService();
   const full = fixture("import-http", [product(1),product(2)]);
   const other = fixture("import-other");
-  const server = createApp({ shopify, staticPath: ".", catalogImportService: service }).listen(0,"127.0.0.1");
+  const server = createApp({ shopify, staticPath: ".", catalogImportService: service, database: pool }).listen(0,"127.0.0.1");
   await new Promise(resolve => server.once("listening",resolve));
   const base = `http://127.0.0.1:${server.address().port}/api/mirror/sync`;
   const post = (path, session = full.session, body = {}) => fetch(`${base}${path}`, { method: "POST", headers: { "Content-Type":"application/json", "x-test-session":session.id }, body: JSON.stringify(body) });
@@ -102,6 +102,7 @@ export async function testCatalogImports(t, pool) {
     });
     await t.test("authenticated HTTP import downloads, reconciles all variant pages and publishes real rows", async () => {
       assert.equal((await fetch(base,{method:"POST"})).status,401);
+      await service.onInstall(full.session);await service.onInstall(other.session);
       assert.equal((await post("",full.session,{shop:other.session.shop})).status,400);
       const response = await post(""); assert.equal(response.status,202);
       const queued = (await response.json()).data;

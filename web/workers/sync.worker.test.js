@@ -103,6 +103,17 @@ test("uncertain adapter failures persist bounded retry eligibility", async () =>
   assert.deepEqual(f.calls.failure[0].failure,{code:"SYNC_OPERATION_FAILED",retryable:true,outcomeUncertain:true,retryAfterMs:900000});
 });
 
+test('failure diagnostics never invoke error accessors or prevent durable recovery',async()=>{
+ let getters=0;const failure=new Error('private dependency details');
+ Object.defineProperty(failure,'code',{get(){getters++;throw Error('must not run');}});
+ const events=[];
+ const f=fixture({steps:{startBulk:async()=>{throw failure;}},options:{logger:{info(){},error(event){events.push(event);}}}});
+ assert.equal((await f.processor.processRun('run-1')).kind,'RETRY_SCHEDULED');
+ assert.equal(getters,0);assert.equal(f.calls.failure.length,1);
+ const event=events.find(e=>e.event==='catalog_sync_failure');
+ assert.equal(event.sourceCode,null);assert.equal(JSON.stringify(event).includes('private dependency details'),false);
+});
+
 test("a hard deadline ends the wait for an adapter that ignores cancellation", {timeout:2000}, async () => {
   let signal;
   const f=fixture({options:{leaseSeconds:1,heartbeatMs:100,stepTimeoutMs:25},steps:{startBulk:({signal:current})=>{signal=current;return new Promise(()=>{});}}});

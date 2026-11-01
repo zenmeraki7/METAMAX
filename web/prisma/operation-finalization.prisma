@@ -1,23 +1,26 @@
+// Migration-owned Edit History schema.
+
 model OperationFinalization {
- shopId String @map("shop_id") @db.Text
- commandId BigInt @map("command_id")
- installationVersion String @map("installation_version") @db.Text
- executionFence BigInt @map("execution_fence")
- itemId BigInt? @map("item_id")
- state String @default("PENDING") @db.Text
- historyPending Boolean @default(true) @map("history_pending")
- undoPending Boolean @default(false) @map("undo_pending")
- attempts Int @default(0)
- fence BigInt @default(0)
- leaseToken String? @map("lease_token") @db.Text
- leaseUntil DateTime? @map("lease_until") @db.Timestamptz(3)
- nextAttemptAt DateTime @default(now()) @map("next_attempt_at") @db.Timestamptz(3)
- lastError String? @map("last_error") @db.Text
- updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(3)
- command JobCommand @relation(fields:[shopId,commandId],references:[shopId,id],onDelete:Cascade)
- item EditItem? @relation(fields:[shopId,itemId],references:[shopId,id],onDelete:Cascade)
- @@id([shopId,commandId])
- @@index([state,nextAttemptAt,leaseUntil],map:"operation_finalization_due")
- @@map("operation_finalizations")
- @@schema("mirror")
+  shopId              String     @map("shop_id")
+  commandId           BigInt     @map("command_id")
+  installationVersion String     @map("installation_version")
+  executionFence      BigInt     @map("execution_fence")
+  itemId              BigInt?    @map("item_id")
+  state               String     @default("PENDING")
+  historyPending      Boolean    @default(true) @map("history_pending")
+  undoPending         Boolean    @default(false) @map("undo_pending")
+  attempts            Int        @default(0)
+  fence               BigInt     @default(0)
+  leaseToken          String?    @map("lease_token")
+  leaseUntil          DateTime?  @map("lease_until") @db.Timestamptz(3)
+  nextAttemptAt       DateTime   @default(now()) @map("next_attempt_at") @db.Timestamptz(3)
+  lastError           String?    @map("last_error")
+  updatedAt           DateTime   @default(now()) @map("updated_at") @db.Timestamptz(3)
+  command             JobCommand @relation(fields: [shopId, commandId], references: [shopId, id], onDelete: Cascade, onUpdate: NoAction)
+  item                EditItem?  @relation(fields: [shopId, itemId], references: [shopId, id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([shopId, commandId])
+  @@index([state, nextAttemptAt, leaseUntil], map: "operation_finalization_due")
+  @@map("operation_finalizations")
+  @@schema("mirror")
 }

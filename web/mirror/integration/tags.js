@@ -194,6 +194,7 @@ export async function testTags(t, pool) {
             {
               id: `tags-session-${index}`,
               shop,
+              isOnline:false,
               scope: "read_products",
               accessToken: "test-token",
             },
@@ -234,7 +235,7 @@ export async function testTags(t, pool) {
             return this;
           },
         };
-        runtime.capture(req, res, () => {});
+        await runtime.capture(req, res, error => {if(error)throw error;});
         await runtime.catalog(req, res, (error) => {
           throw error;
         });

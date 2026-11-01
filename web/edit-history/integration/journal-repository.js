@@ -1,3 +1,4 @@
+import {recordCompletedCatalogImport} from '../../security/test-support/catalog-ready.js';
 import {bindExecutionCoordinates,executionAuthorityRecord} from '../../services/execution-contract.server.js';
 import {readApprovalCoordinates} from '../../services/approval-coordinates.server.js';
 import {WRITE_CAPABILITY_VERSION} from '../../fields/write-capabilities.js';
@@ -74,6 +75,7 @@ export async function testJournalRepository(t, adminPool) {
     await q("UPDATE mirror.generations SET status='PUBLISHED',published_at=now() WHERE shop_id=$1 AND id=$2", [shopId,generationId]);
     await q(`INSERT INTO mirror.publications(shop_id,generation_id,coverage_revision,mapping_version) VALUES($1,$2,'coverage-1','physical-mapping-1')`,[shopId,generationId]);
     }
+    if(!options.existingGeneration)await recordCompletedCatalogImport({query:q},shopId);
     await q(`INSERT INTO mirror.selection_snapshots(shop_id,id,generation_id,coverage_revision,mapping_version,operation,operation_id,
       filter_ast,filter_fingerprint,registry_version,definition_revisions,expires_at)
       VALUES($1,$2,$3,'coverage-1','physical-mapping-1',$6,$4,'{}',$5,'registry-1','[]',now()+interval '2 hours')`,

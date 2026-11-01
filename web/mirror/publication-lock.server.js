@@ -14,6 +14,8 @@ import {FieldError,FIELD_ERROR_CODES as C} from '../fields/types.js';
 export async function lockPublication(client,shopId,{write=false,relation='"mirror"."publications"'}={}) {
   if(typeof client?.query!=='function'||typeof shopId!=='string'||!shopId||Buffer.byteLength(shopId)>255||shopId.includes('\0'))
     throw new FieldError(C.PERMISSION_DENIED,'Trusted publication shop required');
+  // History hooks expose a bounded lock capability without raw LOCK SQL.
+  if(typeof client.publicationLock==='function')return client.publicationLock(shopId,{write,relation});
   // Keep a DDL fence, compatible with ordinary readers and writers. Relation
   // comes only from the installed server-owned schema, never request input.
   // PostgreSQL rejects LOCK TABLE outside an explicit transaction (25P01).

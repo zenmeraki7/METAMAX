@@ -41,6 +41,7 @@ export default function ProductsTable({
   selection,
   density,
   loading = false,
+  readOnly = false,
   error = null,
   emptyMessage = "No products found.",
   page = 1,
@@ -65,6 +66,7 @@ export default function ProductsTable({
     selection?.selectedIds instanceof Set ? selection.selectedIds : null;
 
   const canSelectOne =
+    !readOnly &&
     !isLoading &&
     !hasError &&
     selectedIds !== null &&
@@ -202,6 +204,7 @@ export default function ProductsTable({
                   onSelect={handleSelectProduct}
                   checkboxId={`${tableId}-product-${index}`}
                   disabled={!canSelectOne}
+                  readOnly={readOnly}
                   density={density}
                 />
               ))}

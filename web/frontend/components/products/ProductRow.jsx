@@ -131,6 +131,7 @@ function ProductRow({
   onSelect,
   checkboxId,
   disabled = false,
+  readOnly = false,
   density = "comfortable",
 }) {
   const productTitle =
@@ -169,7 +170,7 @@ function ProductRow({
             />
 
             <span className="products-product-cell__title">
-              {productUrl ? (
+              {productUrl && !readOnly ? (
                 <s-link href={productUrl} target="_top">
                   {productTitle}
                 </s-link>

@@ -75,7 +75,7 @@ export async function testRepositoryAuthority(t,fixture,pool){
   const entries=[first,{beforeSnapshot,intent,attempt,resourceFamilyGid:identity.resourceGid}];
   await f.persistPlan({...f.plan,fields:entries.map(e=>({identity:e.intent.identity,binding:e.intent.binding,resourceFamilyGid:e.resourceFamilyGid,
    intendedValueKind:e.intent.intendedValueKind,intendedValue:e.intent.intendedValue}))});
-  await assert.rejects(()=>f.repository.prepareRequest({...f.input,entries}),{code:'HISTORY_BINDING_CONFLICT',message:'Mutation resource is not part of the exact approved targeting snapshot'});
+  await assert.rejects(()=>f.repository.prepareRequest({...f.input,entries}),{code:'FIELD_UNSUPPORTED_OPERATION'});
   assert.equal((await f.q('SELECT count(*) FROM edit_history.operations WHERE shop_id=$1',[f.shopId])).rows[0].count,'0');
  });
 }

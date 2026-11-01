@@ -1,5 +1,6 @@
 import { randomUUID, createHash } from "node:crypto";
 import { getInstalledFilterSchemaOptions } from "../services/filter-schema.server.js";
+import { SyncOutcomeUnknownError } from './sync-db-transaction.server.js';
 import {
   transaction,
   lockMirror,
@@ -176,6 +177,50 @@ export function createSyncRunService({ database }) {
         };
       };
       return suppliedClient ? allocate(suppliedClient) : transaction(database, allocate, shopId);
+    },
+    /** Legacy bulk-start protocol; method contracts and uncertainty semantics:
+     * docs/backend-interface-contracts.md#legacy-bulk-start-and-ingestion-recovery
+     * Phase-managed executions continue to use sync-external-operations instead.
+     */
+    async prepareBulkStart({ shopId, runId, fence, inputHash }) {
+      if (!/^[a-f0-9]{64}$/.test(inputHash ?? '')) invalid('Trusted bulk query hash required');
+      return transaction(database, async client => {
+        const run = await lockedRun(client, shopId, runId, fence);
+        if (run.execution_id) invalid('Phase-managed bulk start requires execution ledger');
+        if (run.bulk_start_input_hash && run.bulk_start_input_hash !== inputHash) invalid('Cannot replace bulk start input');
+        if (run.bulk_operation_id) return { operationId: run.bulk_operation_id };
+        if (run.bulk_start_operation_id) {
+          await bindBulkOperationIdInTransaction({client,shopId,runId,fence,bulkOperationId:run.bulk_start_operation_id});
+          return { operationId: run.bulk_start_operation_id };
+        }
+        if (run.bulk_start_fence !== null && run.bulk_start_fence !== undefined)
+          throw new SyncOutcomeUnknownError('Bulk start requires authoritative recovery; automatic redispatch is blocked');
+        await client.query(`UPDATE mirror.ingestion_runs SET bulk_start_input_hash=$3,bulk_start_fence=$4
+          WHERE shop_id=$1 AND id=$2`, [shopId,runId,inputHash,fence]);
+        return { dispatchFence: String(fence) };
+      }, shopId);
+    },
+    async recordBulkStartResponse({ shopId, runId, dispatchFence, inputHash, bulkOperationId }) {
+      shop(shopId);
+      if (!/^gid:\/\/shopify\/BulkOperation\/[1-9][0-9]*$/.test(bulkOperationId ?? '')) invalid('Exact bulk response identity required');
+      // Late response evidence may survive lease loss; it cannot acknowledge a run.
+      return transaction(database, async client => {
+        const saved = await client.query(`UPDATE mirror.ingestion_runs SET bulk_start_operation_id=$5
+          WHERE shop_id=$1 AND id=$2 AND bulk_start_fence=$3 AND bulk_start_input_hash=$4
+            AND execution_id IS NULL AND (bulk_start_operation_id IS NULL OR bulk_start_operation_id=$5)
+          RETURNING id`, [shopId,runId,dispatchFence,inputHash,bulkOperationId]);
+        if (saved.rowCount !== 1) throw new SyncOutcomeUnknownError('Bulk response evidence could not be confirmed');
+      }, shopId);
+    },
+    async rejectBulkStart({ shopId, runId, fence, inputHash }) {
+      return transaction(database, async client => {
+        const run = await lockedRun(client,shopId,runId,fence);
+        if (run.execution_id || run.bulk_start_input_hash !== inputHash ||
+            run.bulk_start_fence === null || run.bulk_start_fence === undefined ||
+            BigInt(run.bulk_start_fence) !== BigInt(fence) || run.bulk_start_operation_id || run.bulk_operation_id)
+          throw new SyncOutcomeUnknownError('Bulk rejection could not be confirmed');
+        await client.query('UPDATE mirror.ingestion_runs SET bulk_start_fence=NULL WHERE shop_id=$1 AND id=$2',[shopId,runId]);
+      }, shopId);
     },
     async bindBulkOperationId({ shopId, runId, fence, bulkOperationId }) {
       if (
@@ -492,18 +537,19 @@ export function createSyncRunService({ database }) {
         );
       }, shopId);
     },
+    /** Contract: docs/backend-interface-contracts.md#tenant-scoped-sync-discovery */
     async getSyncRun({ shopId, runId }) {
       shop(shopId);
-      return (
+      return transaction(database, async client => (
         (
-          await database.query(
+          await client.query(
             `SELECT id AS "runId",shop_id AS "shopId",generation_id AS "generationId",dataset,status,
         bulk_operation_id AS "bulkOperationId",fence,processed_lines AS "processedLines",lease_token AS "leaseToken"
         FROM mirror.ingestion_runs WHERE shop_id=$1 AND id=$2`,
             [shopId, runId],
           )
         ).rows[0] ?? null
-      );
+      ), shopId);
     },
   });
 }

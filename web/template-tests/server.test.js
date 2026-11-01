@@ -11,6 +11,7 @@ import { shopifyApp } from "@shopify/shopify-app-express";
 import { createApp } from "../app.js";
 import { createWebhookHandlers } from "../privacy.js";
 import productCreator from "../product-creator.js";
+const readyCatalogImportService={withEditingLock:async(_session,execute)=>execute()};
 import {createFiltersController} from '../controllers/filters.controller.js';
 import {parseFilterAst} from '../filters/ast.js';
 import {requireCanonicalField} from '../fields/canonical.js';
@@ -225,7 +226,7 @@ test('template populate endpoint creates five products with the current mutation
   const response=await fetch(`${base}/api/products`,{method:'POST'});
   assert.equal(response.status,200);
   assert.deepEqual(await response.json(),{success:true,error:null});
- });
+ },{catalogImportService:readyCatalogImportService});
  assert.equal(requests.length,5);
  for(const request of requests){
   assert.match(request.query,/productCreate\(product: \$product\)/);
@@ -241,7 +242,7 @@ test('Shopify product validation errors stop creation and return a failed respon
   const response=await fetch(`${base}/api/products`,{method:'POST'});
   assert.equal(response.status,500);
   assert.equal((await response.json()).success,false);
- });
+ },{catalogImportService:readyCatalogImportService});
  assert.equal(requests.length,1);
 });
 
@@ -258,8 +259,19 @@ test('sample writes reload storage and enforce both app and online staff permiss
   await withServer(shopify,async base=>{
    const response=await fetch(`${base}/api/products`,{method:'POST'});
    assert.equal(response.status,kind==='online-write'?200:kind==='revoked'?401:403,kind);
-  });
+  },{catalogImportService:readyCatalogImportService});
   assert.equal(requests.length,kind==='online-write'?5:0,kind);
+ }
+});
+
+test('sample creation cannot bypass missing or incomplete catalog edit gates',async()=>{
+ for(const gate of [null,{async withEditingLock(){throw Object.assign(Error('locked'),{code:'CATALOG_IMPORT_UNAVAILABLE'});}}]){
+  const requests=[];
+  await withServer(fakeShopify({requests}),async base=>{
+   const response=await fetch(base+'/api/products',{method:'POST'});
+   assert.equal(response.status,503);assert.equal((await response.json()).error,'CATALOG_EDITING_LOCKED');
+  },{catalogImportService:gate});
+  assert.equal(requests.length,0);
  }
 });
 

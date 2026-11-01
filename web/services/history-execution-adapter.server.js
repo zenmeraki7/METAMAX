@@ -90,6 +90,50 @@ export function createHistoryExecutionAdapter() {
         [tenant.shopId, tenant.installationId, op.approved_contract_fingerprint], 'Evidence operation differs from immutable approval authority');
       return approved.executionAuthority;
     },
+    // Contract: docs/backend-interface-contracts.md#historical-item-evidence
+    // Evidence completion keeps current worker ownership, but does not renew a
+    // historical approval or require the publication still to be current.
+    async lockEvidenceItemAuthority({client:tx,tenant,plan,claim}) {
+      await adapter.assertExecutionClaim({client:tx,tenant,jobId:plan.executionJobId,claim});
+      const command=(await tx.query('SELECT * FROM mirror.job_commands WHERE shop_id=$1 AND id=$2 FOR UPDATE',[tenant.shopId,plan.executionJobId])).rows[0];
+      if(!command||command.installation_version!==tenant.installationId||command.contract_id!==plan.executionContractId)
+        fail(C.BINDING_CONFLICT,'Evidence command belongs to another installation or approval');
+      const contract=await getEvidenceContractInTransaction({client:tx,shopId:tenant.shopId,contractId:plan.executionContractId});
+      if(!contract||contract.operation!==command.kind)fail(C.BINDING_CONFLICT,'Immutable evidence approval required');
+      match(plan.executionAuthority,contract.executionAuthority,'Evidence plan differs from immutable approval authority');
+      match(plan.approvedContractFingerprint,contract.executionAuthority.approvedContractHash,'Evidence approval hash differs');
+      match(plan.fieldResolutionFingerprint,contract.executionAuthority.fieldResolutionFingerprint,'Evidence field resolution differs');
+      const coordinates=contract.contract.executionCoordinates;
+      match([plan.targetingSnapshotId,plan.approvalRevision,plan.logicalOperationId,plan.filterFingerprint],
+        [contract.snapshot_id,contract.approval_revision,coordinates.logicalOperationId,'sha256:'+coordinates.filterFingerprint],'Evidence targeting coordinates differ from approval');
+      match(plan.operationKind,{bulk_edit:'BULK_EDIT',import:'IMPORT',undo:'UNDO'}[command.kind],'Evidence operation kind differs');
+      const edit=(await tx.query('SELECT id FROM mirror.edit_operations WHERE shop_id=$1 AND id=$2 AND command_id=$3 AND preview_id=$4 FOR SHARE',
+        [tenant.shopId,plan.editOperationId,plan.executionJobId,plan.executionContractId])).rows[0];
+      if(!edit||!Array.isArray(plan.fields)||!plan.fields.length)fail(C.BINDING_CONFLICT,'Evidence aggregate and field membership required');
+      const first=plan.fields[0].identity,writer=requireResourceWriteContract(resourceTypeForGid(first.resourceGid));
+      const expected={};
+      for(const field of plan.fields){
+        match([field.identity.shopId,field.identity.installationId,field.identity.executionJobId,field.identity.executionItemId,field.identity.resourceGid],
+          [tenant.shopId,tenant.installationId,String(command.id),first.executionItemId,first.resourceGid],'Evidence fields must own one exact execution item');
+        const name=writer.names[field.identity.fieldId];
+        if(!name||Object.hasOwn(expected,name)||field.intendedValueKind!=='VALUE')fail(C.BINDING_CONFLICT,'Unsupported evidence field set');
+        expected[name]=field.intendedValue;
+      }
+      const item=(await tx.query('SELECT id,intended_values FROM mirror.job_items WHERE shop_id=$1 AND command_id=$2 AND id=$3 AND resource_id=$4 FOR SHARE',
+        [tenant.shopId,plan.executionJobId,first.executionItemId,first.resourceGid])).rows[0];
+      if(!item)fail(C.BINDING_CONFLICT,'Evidence item is not owned by its command');
+      match(item.intended_values,expected,'Evidence intended values differ from durable item');
+      match(plan.itemIntendedValues,expected,'Evidence plan values differ from its fields');
+      const payload=contract.contract;
+      if(command.kind==='bulk_edit')match(payload.updates,expected,'Evidence values differ from immutable bulk approval');
+      else if(command.kind==='import'){
+        const row=payload.rows?.find(row=>row.resourceGid===first.resourceGid);
+        if(!row)fail(C.BINDING_CONFLICT,'Evidence import target missing');
+        match(Object.fromEntries(Object.entries(row.fields).map(([id,value])=>[writer.names[id],value])),expected,'Evidence values differ from immutable import row');
+      }else if(command.kind==='undo')match(payload.fields?.slice().sort(),Object.keys(expected).sort(),'Evidence undo field membership differs');
+      else fail(C.BINDING_CONFLICT,'Unsupported evidence operation');
+      return {command,contract,assertClaim:()=>adapter.assertExecutionClaim({client:tx,tenant,jobId:plan.executionJobId,claim})};
+    },
     async lockAuthority({ client: tx, tenant, plan, claim }) {
       const command = (await tx.query(`SELECT * FROM mirror.job_commands WHERE shop_id=$1 AND id=$2 FOR UPDATE`, [tenant.shopId, plan.executionJobId])).rows[0];
       if (command?.installation_version !== tenant.installationId) fail(C.OWNERSHIP_LOST, 'Command belongs to a different installation');

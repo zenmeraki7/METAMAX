@@ -44,7 +44,8 @@ function fixture(kind='bulk_edit',size=201,controls={}){
   if(sql.includes('SELECT c.id FROM mirror.job_commands')){if(sql.includes('FOR UPDATE OF c')){assert.match(sql,/c.installation_version=\$5/);assert.equal(p[4],command.installation_version);}return rows(controls.lost?[]:[{id:command.id}]);}
   if(sql.includes('SELECT id,resource_id,intended_values,restore_snapshot_id'))return rows(items.filter(x=>x.status==='PENDING').slice(0,25));
   if(sql.includes('SELECT r.id FROM edit_history.mutation_requests'))return rows(kind==='undo'||sql.includes('JOIN edit_history.operations o\n   ON')?[{id:'verified'}]:[]);
-  if(sql.includes('SELECT id,before_hash,confirmed_at'))return rows([{id:'snapshot',confirmed_at:new Date()}]);
+  if(sql.includes('SELECT status FROM mirror.job_items'))return rows(items.filter(item=>item.id===p[2]).map(item=>({status:item.status})));
+  if(sql.includes('SELECT id,before_hash,after_hash,confirmed_at'))return rows([{id:'snapshot',confirmed_at:new Date()}]);
   if(sql.includes("UPDATE mirror.job_items SET status='SUCCEEDED'")){items.find(x=>x.id===p[2]).status='SUCCEEDED';return rows([{id:p[2]}]);}
   if(sql.includes('WITH item_outcomes'))return rows([{total:items.length,succeeded:items.filter(x=>x.status==='SUCCEEDED').length,failed:items.filter(x=>x.status==='FAILED').length,pending:items.filter(x=>['PENDING','RUNNING','RETRY'].includes(x.status)&&!controls.uncertain?.has(x.id)).length,uncertain:controls.uncertain?.size??0,cancelled:0,due:null}]);
   if(sql.includes("UPDATE mirror.job_items SET status='FAILED',last_error='PREFLIGHT_CONFLICT'")){items.find(x=>x.id===p[1]).status='FAILED';return rows([]);}
@@ -156,7 +157,7 @@ for(const code of ['STALE_CLAIM','WORKER_CLAIM_REVOKED','INSTALLATION_NOT_ACTIVE
 });
 test('ownership lost during verified local completion recovery is never masked as RECOVERY_REQUIRED',async()=>{
  let first=true;const controls={inspect:async()=>{if(!first){controls.lost=true;return{state:'VERIFIED'};}return{state:'NOT_DISPATCHED'};},queryHook:async sql=>{
-  if(sql.includes('SELECT id,before_hash,confirmed_at')&&first){first=false;throw Error('local snapshot unavailable');}
+  if(sql.includes('SELECT id,before_hash,after_hash,confirmed_at')&&first){first=false;throw Error('local snapshot unavailable');}
   
  }};
  const f=fixture('bulk_edit',1,controls);assert.equal((await f.worker.processOne({workerId:'completion-recovery'})).kind,'STALE_CLAIM');assert.equal(f.items[0].status,'PENDING');

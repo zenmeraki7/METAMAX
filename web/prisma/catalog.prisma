@@ -2,32 +2,33 @@
 
 model SnapshotProduct {
   id              BigInt                 @id @default(autoincrement())
-  shopId          String                 @map("shop_id") @db.Text
-  generationId    String                 @map("generation_id") @db.Text
-  shopifyId       String                 @map("shopify_id") @db.Text
-  title           String                 @db.Text
-  handle          String                 @db.Text
-  descriptionHtml String?                @map("description_html") @db.Text
-  vendor          String?                @db.Text
-  productType     String?                @map("product_type") @db.Text
-  status          String                 @db.Text
+  shopId          String                 @map("shop_id")
+  generationId    String                 @map("generation_id")
+  shopifyId       String                 @map("shopify_id")
+  title           String
+  handle          String
+  descriptionHtml String?                @map("description_html")
+  vendor          String?
+  productType     String?                @map("product_type")
+  status          String
   tags            String[]               @default([])
-  templateSuffix  String?                @map("template_suffix") @db.Text
-  seoTitle        String?                @map("seo_title") @db.Text
-  seoDescription  String?                @map("seo_description") @db.Text
-  categoryId      String?                @map("category_id") @db.Text
+  templateSuffix  String?                @map("template_suffix")
+  seoTitle        String?                @map("seo_title")
+  seoDescription  String?                @map("seo_description")
+  categoryId      String?                @map("category_id")
   createdAt       DateTime               @map("created_at") @db.Timestamptz(3)
   updatedAt       DateTime               @map("updated_at") @db.Timestamptz(3)
   publishedAt     DateTime?              @map("published_at") @db.Timestamptz(3)
   deletedAt       DateTime?              @map("deleted_at") @db.Timestamptz(3)
   sourceRevision  BigInt                 @default(0) @map("source_revision")
-  attributes      Json?                  @db.JsonB
-  generation      MirrorGeneration       @relation(fields: [shopId, generationId], references: [shopId, id], onDelete: Cascade)
-  variants        SnapshotVariant[]
-  options         ProductOption[]
-  collections     CollectionMembership[]
+  attributes      Json?
+  historyLock    Int                    @default(0) @map("_history_lock")
   metafields      MetafieldValue[]
+  collections     CollectionMembership[]
+  options         ProductOption[]
+  generation      MirrorGeneration       @relation(fields: [shopId, generationId], references: [shopId, id], onDelete: Cascade)
   selectedBy      SelectionItem[]
+  variants        SnapshotVariant[]
 
   @@unique([shopId, generationId, shopifyId])
   @@unique([shopId, generationId, id])
@@ -38,18 +39,17 @@ model SnapshotProduct {
 
 model SnapshotVariant {
   id                 BigInt           @id @default(autoincrement())
-  shopId             String           @map("shop_id") @db.Text
-  generationId       String           @map("generation_id") @db.Text
-  shopifyId          String           @map("shopify_id") @db.Text
+  shopId             String           @map("shop_id")
+  generationId       String           @map("generation_id")
+  shopifyId          String           @map("shopify_id")
   productId          BigInt           @map("product_id")
   inventoryItemId    BigInt?          @map("inventory_item_id")
-  title              String           @db.Text
-  sku                String?          @db.Text
-  barcode            String?          @db.Text
-  // @db.Decimal without arguments emits unconstrained NUMERIC (no typmod).
+  title              String
+  sku                String?
+  barcode            String?
   price              Decimal          @db.Decimal
   compareAtPrice     Decimal?         @map("compare_at_price") @db.Decimal
-  inventoryPolicy    String           @map("inventory_policy") @db.Text
+  inventoryPolicy    String           @map("inventory_policy")
   inventoryQuantity  BigInt           @map("inventory_quantity")
   taxable            Boolean
   requiresComponents Boolean          @map("requires_components")
@@ -58,10 +58,10 @@ model SnapshotVariant {
   updatedAt          DateTime         @map("updated_at") @db.Timestamptz(3)
   deletedAt          DateTime?        @map("deleted_at") @db.Timestamptz(3)
   sourceRevision     BigInt           @default(0) @map("source_revision")
-  attributes         Json?            @db.JsonB
-  product            SnapshotProduct  @relation(fields: [shopId, generationId, productId], references: [shopId, generationId, id], onDelete: Cascade)
-  inventoryItem      InventoryItem?   @relation(fields: [shopId, generationId, inventoryItemId], references: [shopId, generationId, id], onDelete: Restrict)
+  attributes         Json?
   metafields         MetafieldValue[]
+  inventoryItem      InventoryItem?   @relation(fields: [shopId, generationId, inventoryItemId], references: [shopId, generationId, id])
+  product            SnapshotProduct  @relation(fields: [shopId, generationId, productId], references: [shopId, generationId, id], onDelete: Cascade)
 
   @@unique([shopId, generationId, shopifyId])
   @@unique([shopId, generationId, id])
@@ -73,11 +73,11 @@ model SnapshotVariant {
 
 model ProductOption {
   id           BigInt          @id @default(autoincrement())
-  shopId       String          @map("shop_id") @db.Text
-  generationId String          @map("generation_id") @db.Text
-  shopifyId    String          @map("shopify_id") @db.Text
+  shopId       String          @map("shop_id")
+  generationId String          @map("generation_id")
+  shopifyId    String          @map("shopify_id")
   productId    BigInt          @map("product_id")
-  name         String          @db.Text
+  name         String
   position     BigInt
   values       String[]        @default([])
   product      SnapshotProduct @relation(fields: [shopId, generationId, productId], references: [shopId, generationId, id], onDelete: Cascade)
@@ -90,11 +90,11 @@ model ProductOption {
 
 model Category {
   id           BigInt           @id @default(autoincrement())
-  shopId       String           @map("shop_id") @db.Text
-  generationId String           @map("generation_id") @db.Text
-  shopifyId    String           @map("shopify_id") @db.Text
-  name         String           @db.Text
-  fullName     String           @map("full_name") @db.Text
+  shopId       String           @map("shop_id")
+  generationId String           @map("generation_id")
+  shopifyId    String           @map("shopify_id")
+  name         String
+  fullName     String           @map("full_name")
   generation   MirrorGeneration @relation(fields: [shopId, generationId], references: [shopId, id], onDelete: Cascade)
 
   @@unique([shopId, generationId, shopifyId])

@@ -28,7 +28,7 @@ export async function testCatalogHttp({ pool, shopId, generationId }) {
   const runtime = await createInstalledFilterHttpRuntime({ database: measured,
     sessionStorage: { loadSession: async id => id === session.id ? session : null }, cursorSecret: randomBytes(32), logger: { error() {} } });
   const pass = () => (_req, _res, next) => next();
-  const shopify = { config: { auth: { path: "/auth", callbackPath: "/auth/callback" }, webhooks: { path: "/webhooks" }, sessionStorage: {} },
+  const shopify = { config: { auth: { path: "/auth", callbackPath: "/auth/callback" }, webhooks: { path: "/webhooks" }, sessionStorage: {loadSession:async id=>id===session.id?session:null} },
     cspHeaders: pass, auth: { begin: pass, callback: pass }, redirectToShopifyOrAppRoot: pass,
     processWebhooks: pass, ensureInstalledOnShop: pass,
     validateAuthenticatedSession: () => (_req, res, next) => { res.locals.shopify = { session: { ...session } }; next(); } };
@@ -126,7 +126,7 @@ export async function testCatalogHttp({ pool, shopId, generationId }) {
     assert.equal((await get({}, "/api/mirror/status")).response.status,403);
     assert.equal((await get()).response.status, 403);
     session.scope = "read_products";
-    session.isOnline=true;session.onlineAccessInfo={associated_user:{id:77},associated_user_scope:'read_orders'};
+    session.isOnline=true;session.expires=new Date(Date.now()+3600000);session.onlineAccessInfo={associated_user:{id:77},associated_user_scope:'read_orders'};
     assert.equal((await get()).response.status,403);
     assert.equal((await get({},sourcesPath)).response.status,403);
     assert.equal((await get({},'/api/catalog/capabilities')).response.status,403);

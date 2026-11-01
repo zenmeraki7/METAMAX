@@ -1,5 +1,7 @@
 import {boundBulkStatus} from './bulk-cleanup-result.server.js';
 import { setTimeout as delay } from "node:timers/promises";
+import { createHash } from 'node:crypto';
+import { SyncOutcomeUnknownError } from './sync-db-transaction.server.js';
 import { invalid, shop } from "./transactions.server.js";
 
 export const PRODUCTS_BULK_QUERY = `
@@ -96,6 +98,7 @@ export function createBulkSyncService({ shopifyClient, syncRunService }) {
   const service = Object.freeze({
     /**
      * Start a new Shopify bulk operation query bound to a running SyncRun.
+     * Contract: docs/backend-interface-contracts.md#legacy-bulk-start-and-ingestion-recovery
      */
     async startBulkQuery({ shopId, syncRun, query = PRODUCTS_BULK_QUERY }) {
       shop(shopId);
@@ -124,28 +127,38 @@ export function createBulkSyncService({ shopifyClient, syncRunService }) {
         });
       }
 
-      // Never adopt another run's currentBulkOperation. An uncertain remote
-      // start may leave an orphan export, but cannot authorize its publication.
-      const response = await shopifyClient.request(BULK_START_MUTATION, {
-        variables: { query },
-      });
-
-      const payload = response.data?.bulkOperationRunQuery;
-      if (
-        response.errors ||
-        !payload?.bulkOperation ||
-        payload.userErrors?.length
-      ) {
-        invalid("Bulk start rejected");
+      if (typeof query !== 'string' || !query || Buffer.byteLength(query) > 1024 * 1024) invalid('Bounded bulk query required');
+      for (const method of ['prepareBulkStart','recordBulkStartResponse','rejectBulkStart']) {
+        if (typeof syncRunService[method] !== 'function') invalid('Durable bulk start protocol required');
       }
-
-      await syncRunService.bindBulkOperationId({
-        shopId,
-        runId: syncRun.runId,
-        fence: syncRun.fence,
-        bulkOperationId: payload.bulkOperation.id,
-      });
-
+      const inputHash = createHash('sha256').update(query).digest('hex');
+      const scope = {shopId,runId:syncRun.runId,fence:syncRun.fence,inputHash};
+      // Commit intent before sending. Lost commit/remote responses never permit
+      // automatic redispatch. Only exact saved response evidence may be bound.
+      const prepared = await syncRunService.prepareBulkStart(scope);
+      if (prepared.operationId) return service.getStatus({shopId,bulkOperationId:prepared.operationId});
+      if (String(prepared.dispatchFence) !== String(syncRun.fence)) invalid('Durable dispatch receipt required');
+      let response;
+      try {
+        response = await shopifyClient.request(BULK_START_MUTATION, { variables: { query } });
+      } catch (error) {
+        throw new SyncOutcomeUnknownError('Bulk start response was lost; recovery required', error);
+      }
+      const payload = response?.data?.bulkOperationRunQuery;
+      if (!response?.errors && payload?.userErrors?.length && !payload.bulkOperation) {
+        await syncRunService.rejectBulkStart(scope);
+        invalid('Bulk start rejected');
+      }
+      const operationId = payload?.bulkOperation?.id;
+      if (response?.errors || payload?.userErrors?.length || !/^gid:\/\/shopify\/BulkOperation\/[1-9][0-9]*$/.test(operationId ?? ''))
+        throw new SyncOutcomeUnknownError('Ambiguous bulk start response; recovery required');
+      try {
+        await syncRunService.recordBulkStartResponse({...scope,dispatchFence:prepared.dispatchFence,bulkOperationId:operationId});
+        const confirmed = await syncRunService.prepareBulkStart(scope);
+        if (confirmed.operationId !== operationId) throw new SyncOutcomeUnknownError('Bulk binding requires recovery');
+      } catch (error) {
+        throw new SyncOutcomeUnknownError('Bulk start binding could not be confirmed; recovery required', error);
+      }
       return payload.bulkOperation;
     },
 

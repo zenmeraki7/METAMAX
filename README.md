@@ -34,21 +34,21 @@ before `npm run dev`. Remove that override when Redis is available again.
 - `web/product-creator.js`: the template's five-product sample, updated for API 2026-10.
 - `web/template-tests`: HTTP and session regression tests.
 
-The official in-memory session adapter stores Shopify sessions independently of
-the application database. Sessions are lost on restart and are not shared across
-server instances. Select a persistent official Shopify session adapter before
-production hosting. SQLite's native package could not install on Windows ARM64,
-so the replacement does not depend on it.
+The app uses the official PostgreSQL session adapter in web/shopify.js. Configure
+SHOPIFY_SESSION_DATABASE_URL with its dedicated session-storage login; runtime
+merchant and worker logins must not own application tables or access migration
+credentials. Sessions persist across restarts. The database roles and transaction
+scopes are verified independently from Shopify session authentication.
 
-`GET /health` reports process health. `GET /api/products/count` reads the Shopify
-product count using the authenticated session. `POST /api/products` creates five
-sample products, as in the official template, and reports Shopify validation
-errors as failures. These endpoints require `read_products,write_products`;
-existing installations must approve the added write scope when running through
-Shopify CLI. Other `/api` endpoints return JSON 404 responses.
-Existing mirror, filters, ingestion, mutation gateway, queues,
-workers, Prisma schema and migrations have been removed. Frontend screens that
-used those APIs need new API wiring; their source and tests were retained.
+GET /health reports process health. Authenticated catalog/count/filter APIs query
+the verified, published mirror. POST /api/products retains the template sample
+creator, requires current product-write permission, and runs under the catalog
+edit barrier. Unsupported API paths return JSON 404 responses.
+
+The source includes the Field/Filter Engines, durable catalog imports,
+reconciliation, frozen selections, approvals, workers, exports and edit history.
+A missing dependency or unverified schema fails closed; feature configuration
+and role-specific database credentials are required before enabling workers.
 
 Existing databases and their data were not deleted. Private `.env` files
 are ignored. The prior
@@ -112,8 +112,8 @@ The backend connects through `web/db/redis.js` on development startup using
 6379 and is bound to localhost only. Redis data persists in the Compose named
 volume with append-only persistence enabled. A backend inside the same Compose
 network should instead use `redis://redis:6379`. Production startup connects
-when REDIS_URL is explicitly configured. Shopify sessions still use the existing
-memory adapter; the Redis client is available for future backend features.
+when REDIS_URL is explicitly configured. Shopify sessions use PostgreSQL. Redis supplies configured queue transports;
+durable database claims and fences remain authoritative across queue removal.
 
 Official foundation: https://github.com/Shopify/shopify-app-template-node
 
@@ -128,13 +128,16 @@ connection on startup when `DATABASE_URL` is set and closes it on shutdown.
 The pooled URL is stored only in ignored `web/.env`, with TLS certificate
 verification enabled. Run `npm run db:check` to verify a live read-only query.
 
-The new database has no application tables yet. The empty Prisma placeholders
-remain available for later schema work; no ORM or migrations are configured.
+The application schema and ordered migrations live in web/prisma/. The backend
+uses pg pools at runtime; Prisma supplies schema tooling and migrations, rather
+than a generated runtime client. The prisma-live directory is a separate
+introspection snapshot. Apply forward migrations with the pinned Prisma CLI and
+a direct migration-owner connection; never use db push to replace custom SQL.
 
 ## Durable catalog imports
 
 The current source includes the mirror schema and Prisma migration history;
-the earlier empty-database description above is historical. Apply migrations
+the earlier template-only database state has been replaced. Apply migrations
 through `web/prisma.config.mjs` before starting the backend. In particular,
 `20261029000000_catalog_import_jobs` installs the durable import queue.
 
@@ -152,3 +155,19 @@ offline session with product-read access. See
 [the catalog import contract](docs/catalog-import-20261029.md) for deployment,
 retry, cancellation and verification details.
 
+
+## Restricted database verification
+
+Run npm --prefix web run test:roles:postgres to test real merchant, catalog-worker,
+operation-worker and history logins, tenant-scope initialization, denied writes,
+rollback and connection reuse. Tests use disposable localhost PostgreSQL only.
+The other database suites are test:schema, test:operations, test:exports,
+test:history:postgres and test:history:upgrade in web/package.json. Set
+FILTER_POSTGRES_BIN to an installed PostgreSQL binary directory to use a native
+temporary cluster; otherwise the runner uses Docker.
+
+DATABASE_URL is the restricted merchant login. CATALOG_WORKER_DATABASE_URL and
+OPERATION_WORKER_DATABASE_URL belong to their separate worker profiles.
+TENANT_DATABASE_URL supplies restricted source reads; history runtime, privacy
+and maintenance each have separate credentials. DIRECT_DATABASE_URL belongs only
+to migration tooling. See web/.env.example and docs/backend-interface-contracts.md.

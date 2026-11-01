@@ -26,6 +26,10 @@ export default function useSyncProgress({activeInterval = 3000, idleInterval = 1
         if (data && (!['QUEUED','RUNNING','RETRY','SUCCEEDED','FAILED','CANCELLED'].includes(data.status) ||
           !Number.isFinite(data.progress?.percent) || data.progress.percent < 0 || data.progress.percent > 100 ||
           typeof data.progress.stage !== 'string' ||
+          (data.editingAllowed != null && typeof data.editingAllowed !== 'boolean') ||
+          (data.previewProducts != null && (!Array.isArray(data.previewProducts) || data.previewProducts.length > 50 || data.previewProducts.some(p =>
+            !p || typeof p.id !== 'string' || !/^gid:\/\/shopify\/Product\/[1-9][0-9]*$/.test(p.id) || typeof p.title !== 'string' ||
+            !['ACTIVE','DRAFT','ARCHIVED'].includes(p.status) || (p.vendor != null && typeof p.vendor !== 'string') || (p.productType != null && typeof p.productType !== 'string')))) ||
           (data.progress.productsSaved != null && (typeof data.progress.productsSaved !== 'string' || !/^\d{1,19}$/.test(data.progress.productsSaved))))) throw new Error("Invalid sync status");
         if (stopped || controller.signal.aborted) return;
         active = syncActive(data);failures = 0;setError(false);setAccessDenied(false);setJob(data);setLastUpdatedAt(Date.now());

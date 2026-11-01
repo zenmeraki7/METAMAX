@@ -108,6 +108,7 @@ export function createJsonlIngestionService({
   shopifyClient,
   bulkSyncService,
 }) {
+  // Contract: docs/backend-interface-contracts.md#legacy-bulk-start-and-ingestion-recovery
   if (!syncRunService || !ingestionWriter || !database) {
     throw new TypeError("Sync dependencies required");
   }
@@ -192,12 +193,12 @@ export function createJsonlIngestionService({
       let newChunks = 0;
       let checkpointPage = new Map(), checkpointPageStart = -1;
       const loadCheckpoints = async () => {
-        if (typeof database.query !== 'function') return;
         const pageStart = Math.floor(ordinal / 1000) * 1000;
         if (checkpointPageStart === pageStart) return;
-        const saved = await database.query(`SELECT ordinal,checksum,line_count::text FROM mirror.ingestion_chunks
+        // Recovery evidence needs the same transaction-local tenant scope as writes.
+        const saved = await transaction(database, client => client.query(`SELECT ordinal,checksum,line_count::text FROM mirror.ingestion_chunks
           WHERE shop_id=$1 AND run_id=$2 AND ordinal>=$3 AND ordinal<$4 ORDER BY ordinal LIMIT 1000`,
-        [shopId,runId,pageStart,pageStart+1000]);
+        [shopId,runId,pageStart,pageStart+1000]), shopId);
         checkpointPage = new Map(saved.rows.map(row => [row.ordinal,row]));
         checkpointPageStart = pageStart;
       };
@@ -206,17 +207,15 @@ export function createJsonlIngestionService({
         if (!batch.length) return;
         signal?.throwIfAborted();
         const records = batch;
-        if (typeof database.query === 'function') {
-          // Immutable metadata is replay evidence, never write authority.
-          await loadCheckpoints();
-          const saved = checkpointPage.get(ordinal);
-          if (saved) {
-            validateProducts(records);
-            const checksum = createHash('sha256').update(JSON.stringify(records)).digest('hex');
-            const lineCount = records.reduce((n,p) => n+1+p.variants.length,0);
-            if (checksum !== saved.checksum || BigInt(lineCount) !== BigInt(saved.line_count)) invalid('Resumed chunk input changed');
-            ordinal++;batch=[];bytes=0;return;
-          }
+        // Immutable metadata is replay evidence, never write authority.
+        await loadCheckpoints();
+        const saved = checkpointPage.get(ordinal);
+        if (saved) {
+          validateProducts(records);
+          const checksum = createHash('sha256').update(JSON.stringify(records)).digest('hex');
+          const lineCount = records.reduce((n,p) => n+1+p.variants.length,0);
+          if (checksum !== saved.checksum || BigInt(lineCount) !== BigInt(saved.line_count)) invalid('Resumed chunk input changed');
+          ordinal++;batch=[];bytes=0;return;
         }
         const receipt = await transaction(database, (client) =>
           ingestionWriter.writeStagingBatch({
@@ -324,12 +323,19 @@ export function createJsonlIngestionService({
         };
       } catch (error) {
         // Committed chunks remain resumable; never declare EOF from lines read.
-        if (signal?.aborted && cancelOnAbort) {
-          await syncRunService.cancelGeneration({ shopId, generationId });
-        } else {
-          await syncRunService
-            .failIngestionRun?.({ shopId, runId, fence, error })
-            ?.catch(() => {});
+        try {
+          if (signal?.aborted && cancelOnAbort) {
+            await syncRunService.cancelGeneration({ shopId, generationId });
+          } else {
+            await syncRunService.failIngestionRun?.({ shopId, runId, fence, error });
+          }
+        } catch (recordingError) {
+          // Preserve both errors for callers; never log product data or raw messages.
+          const failure = new AggregateError([error, recordingError],
+            'Ingestion failed and durable failure recording could not be confirmed', { cause: error });
+          failure.code = 'INGESTION_FAILURE_RECORDING_FAILED';
+          failure.outcomeUncertain = true;
+          throw failure;
         }
         throw error;
       }

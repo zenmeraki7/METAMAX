@@ -7,6 +7,42 @@ import {
 
 const shopId = "bulk-test.myshopify.com";
 
+for (const lost of ['intent','remote','evidence','binding']) {
+  test(`bulk start survives lost ${lost} response without a second dispatch`,async()=>{
+    const id='gid://shopify/BulkOperation/789';
+    let intent=false,evidence=null,bound=null,sends=0,failed=false;
+    const syncRunService={
+      getSyncRun:async()=>({runId:1n,fence:1n,status:'RUNNING',bulkOperationId:bound}),
+      async prepareBulkStart(){
+        if(bound)return {operationId:bound};
+        if(evidence){bound=evidence;if(lost==='binding'&&!failed){failed=true;throw Error('commit response lost');}return {operationId:bound};}
+        if(intent)throw Object.assign(Error('ambiguous dispatch'),{outcomeUncertain:true});
+        intent=true;if(lost==='intent'&&!failed){failed=true;throw Error('commit response lost');}
+        return {dispatchFence:'1'};
+      },
+      async recordBulkStartResponse({bulkOperationId}){evidence=bulkOperationId;if(lost==='evidence'&&!failed){failed=true;throw Error('commit response lost');}},
+      async rejectBulkStart(){assert.fail('An ambiguous outcome must not reset intent');}
+    };
+    const service=createBulkSyncService({syncRunService,shopifyClient:{async request(query){
+      if(query.includes('StartBulkOperation')){sends++;if(lost==='remote')throw Error('response lost');
+        return {data:{bulkOperationRunQuery:{bulkOperation:{id,status:'CREATED'},userErrors:[]}}};}
+      return {data:{bulkOperation:{id,status:'RUNNING'}}};
+    }}});
+    await assert.rejects(()=>service.startBulkQuery({shopId,syncRun:{runId:1n,fence:1n}}));
+    const sent=sends;
+    if(lost==='intent'||lost==='remote')
+      await assert.rejects(()=>service.startBulkQuery({shopId,syncRun:{runId:1n,fence:1n}}));
+    else assert.equal((await service.startBulkQuery({shopId,syncRun:{runId:1n,fence:1n}})).id,id);
+    assert.equal(sends,sent);assert.equal(sends,lost==='intent'?0:1);
+  });
+}
+
+test('bulk start fails closed before Shopify when durable protocol is missing',async()=>{
+  const service=createBulkSyncService({shopifyClient:{request(){assert.fail('No unjournaled mutation');}},
+    syncRunService:{getSyncRun:async()=>({status:'RUNNING',fence:1n})}});
+  await assert.rejects(()=>service.startBulkQuery({shopId,syncRun:{runId:1n,fence:1n}}),/Durable bulk start protocol required/);
+});
+
 test("bulk-sync: constructor requires shopifyClient and syncRunService", () => {
   assert.throws(
     () => createBulkSyncService({}),
@@ -41,6 +77,7 @@ test("bulk-sync: startBulkQuery validates shop and live run, dispatches mutation
   };
 
   let bound = false;
+  let responseId;
   const mockSyncRunService = {
     async getSyncRun({ shopId: s, runId: r }) {
       assert.equal(s, shopId);
@@ -52,13 +89,15 @@ test("bulk-sync: startBulkQuery validates shop and live run, dispatches mutation
         bulkOperationId: null,
       };
     },
-    async bindBulkOperationId({ shopId: s, runId: r, fence, bulkOperationId }) {
-      bound = true;
+    async recordBulkStartResponse({ shopId: s, runId: r, fence, bulkOperationId }) {
+      responseId = bulkOperationId;
       assert.equal(s, shopId);
       assert.equal(r, 42n);
       assert.equal(fence, 5n);
       assert.equal(bulkOperationId, "gid://shopify/BulkOperation/1001");
     },
+    async prepareBulkStart({fence}) { if(responseId){bound=true;return {operationId:responseId};} return {dispatchFence:String(fence)}; },
+    async rejectBulkStart() {},
   };
 
   const service = createBulkSyncService({
@@ -143,6 +182,9 @@ test("bulk-sync: startBulkQuery rejects on userErrors or GraphQL errors", async 
     async getSyncRun() {
       return { runId: 1n, fence: 1n, status: "RUNNING" };
     },
+    async prepareBulkStart() { return {dispatchFence:"1"}; },
+    async recordBulkStartResponse() { assert.fail("Rejected operation has no response ID"); },
+    async rejectBulkStart() {},
   };
 
   const service = createBulkSyncService({

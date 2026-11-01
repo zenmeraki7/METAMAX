@@ -75,7 +75,7 @@ export async function testRepositoryQa(t,fixture,pool){
  });
  await t.test('approval reads use the explicit connection and transaction exclusively',async()=>{
   const f=await fixture(),tx=await pool.connect();let selects=0;
-  try{await tx.query('BEGIN');const before=(await tx.query('SELECT txid_current()::text AS id')).rows[0].id;
+  try{await tx.query('BEGIN');await tx.query("SELECT set_config('app.shop_id',$1,true)",[f.shopId]);const before=(await tx.query('SELECT txid_current()::text AS id')).rows[0].id;
    const approval=await getApprovedContractInTransaction({client:{query(sql,values){selects++;return tx.query(sql,values);}},shopId:f.shopId,contractId:f.contractId});
    assert.equal(approval.id,f.contractId);assert.equal(selects,2);assert.equal((await tx.query('SELECT txid_current()::text AS id')).rows[0].id,before);
    await assert.rejects(()=>getApprovedContractInTransaction({shopId:f.shopId,contractId:f.contractId}),TypeError);
@@ -170,7 +170,7 @@ export async function testRepositoryQa(t,fixture,pool){
  });
  await t.test('database request envelopes prevent bypassing the repository with an incomplete field set',async()=>{
   const f=await fixture();await f.repository.prepareRequest(f.input);
-  const tx=await pool.connect();try{await tx.query('BEGIN');
+  const tx=await pool.connect();try{await tx.query('BEGIN');await tx.query("SELECT set_config('app.shop_id',$1,true)",[f.shopId]);
    await tx.query(`INSERT INTO edit_history.mutation_requests(id,shop_id,installation_id,operation_id,mutation_id,attempt_id,attempt_number,
     execution_item_id,execution_fence_epoch,execution_claim_id,mutation_plan_fingerprint,request_fingerprint,resource_field_set,field_count,request_state,dispatch_handoff_key)
     SELECT $2,shop_id,installation_id,operation_id,'independent-request','independent-attempt',1,execution_item_id,execution_fence_epoch,execution_claim_id,

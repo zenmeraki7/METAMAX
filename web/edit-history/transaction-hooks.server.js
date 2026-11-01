@@ -1,3 +1,4 @@
+import {lockPublication} from '../mirror/publication-lock.server.js';
 import { HistoryContractError,HISTORY_ERROR_CODES as C } from './history-contract.js';
 // Application authority/receipt callbacks can read and lock on this exact
 // connection, but cannot commit it or retain a usable client after completion.
@@ -10,7 +11,13 @@ export function createHistoryHookInvoker(client,{budgetMs=15000,hookMs=5000}={})
   if(remaining<=0)throw new HistoryContractError(C.OWNERSHIP_LOST,'History transaction deadline exceeded');
   let active=true,timer;
   const controller=new AbortController();
-  const guarded=Object.freeze({async query(sql,values){
+  const scopedShop=args.tenant?.shopId;
+  const checkActive=()=>{if(!active||Date.now()>=deadline)throw new HistoryContractError(C.OWNERSHIP_LOST,'Transaction callback capability expired');};
+  const guarded=Object.freeze({async publicationLock(shopId,{write=false,relation='"mirror"."publications"'}={}){
+   checkActive();
+   if(shopId!==scopedShop||write!==false||relation!=='"mirror"."publications"')throw new HistoryContractError(C.UNAUTHORIZED,'Exact tenant publication read lock required');
+   await lockPublication(client,shopId);checkActive();
+  },async query(sql,values){
    if(!active||Date.now()>=deadline)throw new HistoryContractError(C.OWNERSHIP_LOST,'Transaction callback capability expired');
    if(typeof sql!=='string'||!/^\s*SELECT\b/i.test(sql)||sql.replace(/;\s*$/,'').includes(';'))throw new HistoryContractError(C.UNAUTHORIZED,'Authority callbacks require one parameterized SELECT statement');
    const result=await client.query(sql,values);

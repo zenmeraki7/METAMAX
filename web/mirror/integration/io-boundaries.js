@@ -34,7 +34,7 @@ export async function testIoBoundaries(t,{pool,shopId,generationId,authenticatio
   const catalogQueryService=createCatalogQueryService({compiler,executor,resolveShop:authentication.resolveShop,resolveDatasets});
   const selections=createSelectionService({database:pool,catalogQueryService,resolveShop:authentication.resolveShop,logger:{error(){}}});
   const resolveMerchantActor=async context=>{const current=await authentication.resolveSession(context);if(!current.merchantId)throw Error("Verified merchant actor missing");return {id:current.merchantId,shopId:current.shop};};
-  const approval=createApprovalService({database:pool,resolveMerchantActor,logger:{error(){}},authorizeImportApproval:async({authContext:context,payload,snapshot})=>{
+  const approval=createApprovalService({database:pool,resolveMerchantActor,logger:{error(){}},authorizeApproval:async({authContext:context,shopId:expected})=>(await authentication.resolveShop(context))===expected,authorizeImportApproval:async({authContext:context,payload,snapshot})=>{
     await fieldService.requireFields({authContext:context,fieldIds:payload.fieldIds,access:"write",operation:"import",executionContext:{phase:"preview",operationId:snapshot.operation_id,
       generationId:snapshot.generation_id,coverageRevision:snapshot.coverage_revision,expectedRegistryVersion:payload.registryVersion}});
     return true;
@@ -98,7 +98,7 @@ export async function testIoBoundaries(t,{pool,shopId,generationId,authenticatio
         approvalService:approval,fieldService,physicalSchema,authorizeExport:async({authContext:context})=>(await authentication.resolveSession(context)).scope.includes("read_products")});
       const prepare=async format=>{
         const snapshot=await selections.createSelection({authContext,productIds:allRows.slice(0,2).map(row=>row.id),operation:"export"});
-        const contract=await approval.approveContract({shopId,snapshotId:snapshot.snapshotId,operation:"export",contractPayload:{format,fields:EXPORT_FIELD_IDS},approvedBy:"merchant-fixture"});
+        const contract=await approval.approveContract({authContext,shopId,snapshotId:snapshot.snapshotId,operation:"export",contractPayload:{format,fields:EXPORT_FIELD_IDS},approvedBy:"merchant-fixture"});
         const command=(await pool.query("INSERT INTO mirror.job_commands(shop_id,contract_id,idempotency_key,kind,updated_at) VALUES($1,$2,$3,'export',now()) RETURNING id",[shopId,contract.contractId,randomUUID()])).rows[0].id;
         return {command,...await exports.createExportJob({authContext,commandId:command,format})};
       };
@@ -143,7 +143,7 @@ export async function testIoBoundaries(t,{pool,shopId,generationId,authenticatio
       const badReceipt=writer(),commit=badReceipt.commit;badReceipt.commit=async input=>({...await commit(input),durable:false});
       await assert.rejects(()=>exports.generateExportArtifact({authContext,exportJobId:failed.exportJobId,writer:badReceipt}),/completion could not be verified/);
       assert.equal((await pool.query("SELECT count(*) FROM mirror.job_artifacts WHERE shop_id=$1 AND command_id=$2",[shopId,failed.command])).rows[0].count,"0");
-      await pool.query("DELETE FROM mirror.catalog_import_jobs WHERE shop_id=$1 AND id=$2",[shopId,evidenceId]);
+      await pool.query("DELETE FROM mirror.catalog_import_jobs WHERE shop_id=$1",[shopId]);
       await assert.rejects(()=>prepare("jsonl"),/obsolete or unverified installation/);
       await pool.query("INSERT INTO mirror.catalog_import_jobs(id,shop_id,installation_version,status,generation_id) VALUES($1,$2,'selection-install','SUCCEEDED',$3)",[evidenceId,shopId,generationId]);
       const cancelled=await prepare("jsonl"),cancelWriter=writer(),originalWrite=cancelWriter.write;let cancelOnce=false;

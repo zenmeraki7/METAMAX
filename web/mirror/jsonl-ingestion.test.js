@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Readable } from "node:stream";
+import { createHash } from 'node:crypto';
+import { product } from './integration/sync-hardening.js';
 import {
   createJsonlIngestionService,
   streamLinesFromReadable,
@@ -9,6 +11,45 @@ import {
 
 const shopId = "jsonl-test.myshopify.com";
 const generationId = "gen-jsonl-1";
+
+test('checkpoint recovery establishes tenant scope on the transaction connection before reading', async () => {
+  const record=product(71,[]), {variants,...flat}=record;
+  const checksum=createHash('sha256').update(JSON.stringify([record])).digest('hex');
+  let active=false,scope=null,reads=0,writes=0,completed=false;
+  const database={
+    query(){assert.fail('Checkpoint reads must never use pool.query');},
+    async connect(){return {async query(sql,params){
+      if(sql.startsWith('BEGIN')){active=true;scope=null;}
+      if(sql.includes("set_config('app.shop_id'")){assert.equal(active,true);scope=params[0];}
+      if(sql.includes('SELECT ordinal,checksum')){
+        assert.equal(active,true);assert.equal(scope,shopId);
+        assert.deepEqual(params,[shopId,77n,0,1000]);reads++;
+        return {rows:[{ordinal:0,checksum,line_count:'1'}]};
+      }
+      if(sql==='COMMIT'||sql==='ROLLBACK'){active=false;scope=null;}
+      return {rows:[]};
+    },release(){assert.equal(active,false);}};}
+  };
+  const service=createJsonlIngestionService({database,
+    ingestionWriter:{async writeStagingBatch(){writes++;}},
+    bulkSyncService:{getStatus:async()=>({id:'gid://shopify/BulkOperation/77',status:'COMPLETED',objectCount:'1'})},
+    syncRunService:{getSyncRun:async()=>({generationId,status:'RUNNING',fence:1n,bulkOperationId:'gid://shopify/BulkOperation/77'}),
+      async completeIngestionRun(){completed=true;},async transitionGenerationToReconciling(){}}});
+  assert.equal((await service.ingestJsonlLines({shopId,generationId,runId:77n,fence:1n,lines:[JSON.stringify(flat)]})).succeeded,true);
+  assert.equal(reads,1);assert.equal(writes,0);assert.equal(completed,true);
+});
+
+test('ingestion propagates both primary and failure-recording errors without losing evidence',async()=>{
+  const original=new Error('primary'),secondary=new Error('secondary');
+  const service=createJsonlIngestionService({database:{},ingestionWriter:{},
+    bulkSyncService:{async getStatus(){throw original;}},
+    syncRunService:{getSyncRun:async()=>({generationId,status:'RUNNING',fence:1n,bulkOperationId:'gid://shopify/BulkOperation/77'}),
+      async failIngestionRun({error}){assert.equal(error,original);throw secondary;}}});
+  await assert.rejects(()=>service.ingestJsonlLines({shopId,generationId,runId:77n,fence:1n,lines:[]}),error=>{
+    assert.ok(error instanceof AggregateError);assert.equal(error.code,'INGESTION_FAILURE_RECORDING_FAILED');
+    assert.equal(error.cause,original);assert.deepEqual(error.errors,[original,secondary]);assert.equal(error.outcomeUncertain,true);return true;
+  });
+});
 
 test("jsonl-ingestion: streamLinesFromReadable yields lines iteratively from a Readable stream", async () => {
   const content = [

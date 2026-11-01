@@ -1,3 +1,4 @@
+import {lockPublication} from '../mirror/publication-lock.server.js';
 import {requireResourceWriteContract,resourceTypeForGid,assertInstalledUndoCapability} from '../fields/write-capabilities.js';
 /** Durable undo approval/handoff state. Never performs remote writes. */
 import {randomUUID} from 'node:crypto';
@@ -17,6 +18,8 @@ export function createUndoRepository({database,historyRepository,resolveTenant,a
   const tx=await db.connect(),invoke=createHistoryHookInvoker(tx);try{
    await tx.query('BEGIN ISOLATION LEVEL SERIALIZABLE');await tx.query("SET LOCAL idle_in_transaction_session_timeout='15000ms'");
    const tenant=await invoke(resolveTenant,{authContext});
+   await lockPublication(tx,tenant.shopId);
+   await tx.query("SELECT set_config('app.installation_id',$1,true)",[tenant.installationId]);
    const check=async()=>{const now=await invoke(resolveTenant,{authContext});if(now.shopId!==tenant.shopId||now.installationId!==tenant.installationId||
     await invoke(authorizeUndo,{authContext,tenant,operation:action})!==true)fail('Current independent undo permission required');
     if(!(await tx.query('SELECT id FROM mirror.shops WHERE id=$1 AND installation_version=$2 AND uninstalled_at IS NULL FOR SHARE',[tenant.shopId,tenant.installationId])).rows.length)fail('Current undo installation required');};

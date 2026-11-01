@@ -526,6 +526,7 @@ export function createSyncProcessor({
 
     let result;
     let failure;
+    let source = {};
 
     try {
       const stepPromise = Promise.resolve().then(
@@ -573,6 +574,14 @@ export function createSyncProcessor({
       );
     } catch (error) {
       failure = classifyError(error);
+      try {
+        const value=(key,pattern)=>{
+          const descriptor=Object.getOwnPropertyDescriptor(error??{},key);
+          return descriptor && Object.hasOwn(descriptor,'value') && typeof descriptor.value==='string' && pattern.test(descriptor.value) ? descriptor.value : null;
+        };
+        source={sourceCode:value('code',/^[A-Z0-9_]{1,64}$/),sourceType:value('name',/^[A-Za-z]{1,64}$/),
+          sourceConstraint:value('constraint',/^[a-z0-9_]{1,63}$/),sourceStage:value('catalogStage',/^(CONTEXT|DOWNLOAD|IMPORT)$/)};
+      } catch { /* Diagnostics cannot prevent durable failure/recovery handling. */ }
     } finally {
       closed = true;
       clearInterval(heartbeatTimer);
@@ -634,6 +643,7 @@ export function createSyncProcessor({
         runId,
         phase: claim.phase,
         code: failure.code,
+        ...source,
         recorded,
       });
 

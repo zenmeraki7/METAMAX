@@ -57,11 +57,17 @@ export function createOperationWorker({database,shopifyClientFactory,approvalSer
   await owner(tx,claim);
   if(await historyExecution.verifyItemCompletion({tx,claim,item,approved,result})!==true)
    throw Object.assign(Error('Complete field verification required'),{code:'HISTORY_VERIFICATION_INCOMPLETE'});
-  const snapshot=(await tx.query('SELECT id,before_hash,confirmed_at FROM mirror.product_snapshots WHERE shop_id=$1 AND edit_item_id=$2 FOR UPDATE',[claim.shop_id,item.id])).rows[0];
+  const snapshot=(await tx.query('SELECT id,before_hash,after_hash,confirmed_at FROM mirror.product_snapshots WHERE shop_id=$1 AND edit_item_id=$2 FOR UPDATE',[claim.shop_id,item.id])).rows[0];
   if(!snapshot||result?.beforeValues&&snapshot.before_hash!==hash(result.beforeValues))throw Error('Owned immutable engine BEFORE snapshot required');
   const updated=await tx.query(`UPDATE mirror.job_items SET status='SUCCEEDED',last_error=NULL,next_attempt_at=NULL
    WHERE shop_id=$1 AND command_id=$2 AND id=$3 AND status IN ('PENDING','RETRY','RUNNING') RETURNING id`,[claim.shop_id,claim.id,item.id]);
-  if(updated.rowCount!==1)throw Object.assign(Error('Fenced item completion failed'),{code:'HISTORY_OWNERSHIP_LOST'});
+  if(updated.rowCount!==1){
+   // A lost COMMIT response may follow a durable completion. Evidence and the
+   // current claim were reverified above; accept only that exact final state.
+   const prior=(await tx.query('SELECT status FROM mirror.job_items WHERE shop_id=$1 AND command_id=$2 AND id=$3 FOR SHARE',[claim.shop_id,claim.id,item.id])).rows[0];
+   if(prior?.status==='SUCCEEDED'&&snapshot.confirmed_at&&snapshot.after_hash===hash(approved))return Object.freeze({state:'SUCCEEDED',itemId:String(item.id)});
+   throw Object.assign(Error('Fenced item completion failed'),{code:'HISTORY_OWNERSHIP_LOST'});
+  }
   if(!snapshot.confirmed_at)await tx.query('UPDATE mirror.product_snapshots SET after_hash=$3,confirmed_at=clock_timestamp() WHERE shop_id=$1 AND id=$2',
    [claim.shop_id,snapshot.id,hash(approved)]);
   return Object.freeze({state:'SUCCEEDED',itemId:String(item.id)});
@@ -87,6 +93,7 @@ export function createOperationWorker({database,shopifyClientFactory,approvalSer
     ON s.id=c.shop_id AND s.installation_version=c.installation_version AND s.uninstalled_at IS NULL
     WHERE c.kind IN('bulk_edit','undo','import') AND c.attempts<c.max_attempts AND c.cancel_requested_at IS NULL
      AND NOT COALESCE((c.checkpoint->>'review_required')::boolean,false)
+     AND mirror.catalog_edit_is_ready(c.shop_id)
      AND ((c.status IN('PENDING','RETRY') AND c.available_at<=clock_timestamp()) OR(c.status='RUNNING' AND c.lease_until<=clock_timestamp()))
      AND NOT EXISTS(SELECT 1 FROM edit_history.operations o JOIN edit_history.mutation_requests r
       ON r.shop_id=o.shop_id AND r.installation_id=o.installation_id AND r.operation_id=o.id

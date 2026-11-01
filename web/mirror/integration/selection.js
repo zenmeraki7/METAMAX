@@ -1,3 +1,5 @@
+import {recordCompletedCatalogImport} from '../../security/test-support/catalog-ready.js';
+import {WRITE_CAPABILITY_VERSION} from '../../fields/write-capabilities.js';
 import {createRestrictedRuntimeProfiles} from '../../security/test-support/restricted-runtime.js';
 import {createDatabaseInstallationResolver} from '../../security/installation-lifecycle.server.js';
 import assert from "node:assert/strict";
@@ -54,9 +56,10 @@ export async function testSelection(t, pool, { onlyDispatch = false } = {}) {
     await writer.query("COMMIT");
   } finally { await writer.query("ROLLBACK"); writer.release(); }
 
-  const session = { id: "selection-live-session", shop: shopId,isOnline:false, scope: "read_products", accessToken: "fixture-token" };
+  await recordCompletedCatalogImport(pool,shopId);
+  const session = { id: "selection-live-session", shop: shopId,isOnline:false, scope: "read_products,write_products", accessToken: "fixture-token" };
   let active = true;
-  const authentication = createFilterAuthentication({resolveInstallation:createDatabaseInstallationResolver({database:merchant}), sessionStorage: { loadSession: async () => active ? session : null } });
+  const authentication = createFilterAuthentication({resolveInstallation:createDatabaseInstallationResolver({database:pool}), sessionStorage: { loadSession: async () => active ? session : null } });
   const req = {};
   await authentication.capture(req, { locals: { shopify: { session } } }, () => {});
   const authContext = await authentication.authenticate(req);
@@ -104,7 +107,7 @@ export async function testSelection(t, pool, { onlyDispatch = false } = {}) {
       resolveMerchantActor:async context=>({id:'selection-fixture',shopId:await authentication.resolveShop(context)}),
       authorizeApproval:async({authContext:context,shopId:expected})=>await authentication.resolveShop(context)===expected});
     const approved = await approval.approveContract({authContext,shopId,snapshotId:snapshot.snapshotId,
-      contractPayload:{updates:{title:"Approved title"}},approvedBy:"selection-fixture"});
+      contractPayload:{writeCapabilityVersion:WRITE_CAPABILITY_VERSION,updates:{title:"Approved title"}},approvedBy:"selection-fixture"});
     const dispatch = createJobDispatchService({resolveTenant:authentication.resolveTenant,database:merchant,catalogQueryService:catalog,resolveShop:authentication.resolveShop,
       approvalService:approval,authorizeWrite:async () => true});
     const results = await Promise.all(Array.from({length:4},()=>dispatch.dispatchBulkEdit({authContext,contractId:approved.contractId})));
@@ -141,7 +144,7 @@ export async function testSelection(t, pool, { onlyDispatch = false } = {}) {
     const schedules=createSchedulesService({workerDatabase:profiles.operationWorker,database:merchant,selectionService:selections,approvalService:approval,jobDispatchService:dispatch,
       resolveShop:authentication.resolveShop,getScheduleAuthContext:async()=>authContext,logger:{error(){}}});
     const now=new Date();
-    const schedule=await schedules.createSchedule({authContext,firstRunAt:now,template:{filter,contractPayload:{updates:{title:"Scheduled"},nested:{z:2,a:{y:1,b:0}}}}});
+    const schedule=await schedules.createSchedule({authContext,firstRunAt:now,template:{filter,contractPayload:{writeCapabilityVersion:WRITE_CAPABILITY_VERSION,updates:{title:"Scheduled"},nested:{z:2,a:{y:1,b:0}}}}});
     const occurrences=await schedules.triggerDueSchedules({now});
     assert.equal(occurrences.length,1);
     const occurrenceId=occurrences[0].id;
@@ -152,7 +155,7 @@ export async function testSelection(t, pool, { onlyDispatch = false } = {}) {
     }
     const occurrence=(await pool.query("SELECT * FROM mirror.schedule_occurrences WHERE id=$1",[occurrenceId])).rows[0];
     assert.equal(occurrence.status,"DISPATCHED");assert.equal(occurrence.phase,"DONE");assert.equal(queueCalls,0);
-    const contract=await approval.getApprovedContract({shopId,contractId:occurrence.contract_id});
+    const contract=await approval.getApprovedContract({client:pool,shopId,contractId:occurrence.contract_id});
     assert.equal(contract.hash_version,"canonical-v2");
     assert.equal(typeof contract.canonical_contract,"string");
     assert.equal((await pool.query("SELECT data_type FROM information_schema.columns WHERE table_schema='mirror' AND table_name='execution_contracts' AND column_name='contract'")).rows[0].data_type,"jsonb");
@@ -171,13 +174,13 @@ export async function testSelection(t, pool, { onlyDispatch = false } = {}) {
     const selections=createSelectionService({database:merchant,catalogQueryService:catalog,resolveShop:authentication.resolveShop});
     const approval=approvalFor(merchant);
     const dispatch=createJobDispatchService({resolveTenant:authentication.resolveTenant,database:merchant,approvalService:approval,resolveShop:authentication.resolveShop,authorizeWrite:async()=>true});
-    let deny=true,loseCommit=false;
+    let deny=true,loseCommit=false,authResolutions=0;
     const db={query:(...args)=>merchant.query(...args),async connect(){const client=await merchant.connect();return {release:()=>client.release(),async query(sql,...args){
       const result=await client.query(sql,...args);if(sql==="COMMIT"&&loseCommit){loseCommit=false;throw new Error("COMMIT response lost");}return result;
     }};}};
     const schedules=createSchedulesService({workerDatabase:profiles.operationWorker,database:db,resolveShop:authentication.resolveShop,selectionService:selections,approvalService:approval,jobDispatchService:dispatch,
-      getScheduleAuthContext:async()=>{if(deny)throw new Error("credentials temporarily unavailable");return authContext;},logger:{error(){}}});
-    const now=new Date(),schedule=await schedules.createSchedule({authContext,firstRunAt:now,template:{filter,contractPayload:{updates:{title:"Retry"}}}});
+      getScheduleAuthContext:async()=>{authResolutions++;if(deny)throw new Error("credentials temporarily unavailable");return authContext;},logger:{error(){}}});
+    const now=new Date(),schedule=await schedules.createSchedule({authContext,firstRunAt:now,template:{filter,contractPayload:{writeCapabilityVersion:WRITE_CAPABILITY_VERSION,updates:{title:"Retry"}}}});
     const occurrence=(await schedules.triggerDueSchedules({now}))[0];
     assert.equal((await schedules.processNextOccurrence()).kind,"RETRY");
     const retry=(await pool.query("SELECT * FROM mirror.schedule_occurrences WHERE id=$1",[occurrence.id])).rows[0];
@@ -201,10 +204,62 @@ export async function testSelection(t, pool, { onlyDispatch = false } = {}) {
     await pool.query(`INSERT INTO mirror.operation_finalizations(shop_id,command_id,installation_version,execution_fence,state,history_pending,undo_pending)
       SELECT shop_id,id,installation_version,fence,'SUCCEEDED',false,false FROM mirror.job_commands WHERE id=$1`,[done.command_id]);
     await pool.query("UPDATE mirror.schedule_occurrences SET next_attempt_at=clock_timestamp()-interval '1 second' WHERE id=$1",[occurrence.id]);
+    deny=true;const beforeOutcomePoll=authResolutions;
     assert.equal((await schedules.processNextOccurrence()).kind,"ADVANCED");
+    assert.equal(authResolutions,beforeOutcomePoll);
     const finished=(await pool.query("SELECT * FROM mirror.schedule_occurrences WHERE id=$1",[occurrence.id])).rows[0];
     assert.equal(finished.status,"SUCCEEDED");
     await pool.query("UPDATE mirror.job_schedules SET enabled=false WHERE id=$1",[schedule.id]);
+  });
+
+  await t.test("crash after command creation rolls dispatch back before the occurrence checkpoint",async()=>{
+    const selections=createSelectionService({database:merchant,catalogQueryService:catalog,resolveShop:authentication.resolveShop});
+    const approval=approvalFor(merchant);
+    let queueCalls=0,crash=true,rolledBackCommand;
+    const dispatch=createJobDispatchService({resolveTenant:authentication.resolveTenant,database:merchant,approvalService:approval,
+      resolveShop:authentication.resolveShop,authorizeWrite:async()=>true,queue:{async add(){queueCalls++;}}});
+    const schedules=createSchedulesService({workerDatabase:profiles.operationWorker,database:merchant,resolveShop:authentication.resolveShop,
+      selectionService:selections,approvalService:approval,getScheduleAuthContext:async()=>authContext,logger:{error(){}},jobDispatchService:{
+        async dispatchBulkEdit(options){
+          const result=await dispatch.dispatchBulkEdit(options);
+          if(crash){
+            const rows=await options.client.query('SELECT id FROM mirror.job_commands WHERE shop_id=$1 AND contract_id=$2',[shopId,options.contractId]);
+            assert.equal(rows.rowCount,1);rolledBackCommand=rows.rows[0].id;
+            // Fail after command/items/outbox creation, before advance() can
+            // checkpoint command_id. All must share the caller's transaction.
+            throw new Error('simulated crash before occurrence checkpoint');
+          }
+          return result;
+        }
+      }});
+    const now=new Date(),schedule=await schedules.createSchedule({authContext,firstRunAt:now,
+      template:{filter,contractPayload:{writeCapabilityVersion:WRITE_CAPABILITY_VERSION,updates:{title:'Crash recovery'}}}});
+    const occurrence=(await schedules.triggerDueSchedules({now}))[0];
+    for(const phase of ['SELECT','APPROVE'])assert.equal((await schedules.processNextOccurrence()).phase,phase);
+    const before=(await pool.query('SELECT * FROM mirror.schedule_occurrences WHERE id=$1',[occurrence.id])).rows[0];
+    assert.equal((await schedules.processNextOccurrence()).kind,'RETRY');
+    const failed=(await pool.query('SELECT * FROM mirror.schedule_occurrences WHERE id=$1',[occurrence.id])).rows[0];
+    assert.equal(failed.phase,'DISPATCH');assert.equal(failed.status,'RETRY');assert.equal(failed.command_id,null);
+    assert.equal(failed.contract_id,before.contract_id);assert.equal(failed.snapshot_id,before.snapshot_id);
+    for(const table of ['job_commands','job_items','outbox_events']){
+      const key=table==='job_commands'?'id':'command_id';
+      assert.equal((await pool.query(`SELECT count(*) FROM mirror.${table} WHERE shop_id=$1 AND ${key}=$2`,[shopId,rolledBackCommand])).rows[0].count,'0');
+    }
+    assert.equal(queueCalls,0);
+    crash=false;
+    // Model a dead worker's expired claim rather than waiting for retry delay.
+    await pool.query("UPDATE mirror.schedule_occurrences SET status='RUNNING',lease_token='crashed-dispatch',lease_until=now()-interval '1 second' WHERE id=$1",[occurrence.id]);
+    assert.equal((await schedules.processNextOccurrence()).phase,'DISPATCH');
+    const recovered=(await pool.query('SELECT * FROM mirror.schedule_occurrences WHERE id=$1',[occurrence.id])).rows[0];
+    assert.equal(recovered.status,'DISPATCHED');assert.ok(BigInt(recovered.fence)>BigInt(failed.fence));
+    assert.equal(recovered.snapshot_id,before.snapshot_id);assert.equal(recovered.contract_id,before.contract_id);
+    assert.equal((await pool.query('SELECT count(*) FROM mirror.job_commands WHERE shop_id=$1 AND contract_id=$2',[shopId,before.contract_id])).rows[0].count,'1');
+    assert.equal((await pool.query('SELECT count(*) FROM mirror.job_items WHERE shop_id=$1 AND command_id=$2',[shopId,recovered.command_id])).rows[0].count,'205');
+    assert.equal((await pool.query('SELECT count(*) FROM mirror.outbox_events WHERE shop_id=$1 AND command_id=$2',[shopId,recovered.command_id])).rows[0].count,'1');
+    assert.equal(queueCalls,0);
+    await pool.query("UPDATE mirror.schedule_occurrences SET status='CANCELLED' WHERE id=$1",[occurrence.id]);
+    await pool.query("UPDATE mirror.job_commands SET status='CANCELLED' WHERE id=$1",[recovered.command_id]);
+    await pool.query('UPDATE mirror.job_schedules SET enabled=false WHERE id=$1',[schedule.id]);
   });
 
   await t.test("cancelling during selection fences its checkpoint and rolls back the entire protected snapshot",async()=>{
@@ -224,7 +279,7 @@ export async function testSelection(t, pool, { onlyDispatch = false } = {}) {
           assert.equal(await schedules.cancelOccurrence({authContext,occurrenceId}),true);
           return callback(scope);
         })}});
-    const now=new Date(),schedule=await schedules.createSchedule({authContext,firstRunAt:now,template:{filter,contractPayload:{updates:{title:"Cancelled"}}}});
+    const now=new Date(),schedule=await schedules.createSchedule({authContext,firstRunAt:now,template:{filter,contractPayload:{writeCapabilityVersion:WRITE_CAPABILITY_VERSION,updates:{title:"Cancelled"}}}});
     occurrenceId=(await schedules.triggerDueSchedules({now}))[0].id;
     const before=await countSnapshots();
     assert.equal((await schedules.processNextOccurrence()).kind,"SUPERSEDED");
@@ -239,7 +294,7 @@ export async function testSelection(t, pool, { onlyDispatch = false } = {}) {
     const selections=createSelectionService({database:merchant,catalogQueryService:catalog,resolveShop:authentication.resolveShop});
     const snapshot=await selections.createSelection({authContext,productIds:[allRows[0].id]});
     const approval=approvalFor(merchant);
-    const approved=await approval.approveContract({authContext,shopId,snapshotId:snapshot.snapshotId,contractPayload:{updates:{title:"Outbox"}},approvedBy:"selection-fixture"});
+    const approved=await approval.approveContract({authContext,shopId,snapshotId:snapshot.snapshotId,contractPayload:{writeCapabilityVersion:WRITE_CAPABILITY_VERSION,updates:{title:"Outbox"}},approvedBy:"selection-fixture"});
     const dispatch=createJobDispatchService({resolveTenant:authentication.resolveTenant,database:merchant,approvalService:approval,resolveShop:authentication.resolveShop,authorizeWrite:async()=>true,
       queue:{async add(){assert.fail("Dispatch cannot publish directly");}}});
     const jobs=[];let uncertain=true;
@@ -282,14 +337,14 @@ export async function testSelection(t, pool, { onlyDispatch = false } = {}) {
       selectionService:{withSelectionTransaction(){assert.fail("Exhausted occurrence executed");}},
       approvalService:{approveContract(){assert.fail();}},jobDispatchService:{dispatchBulkEdit(){assert.fail();}}});
     const now=new Date();
-    const schedule=await schedules.createSchedule({authContext,firstRunAt:now,template:{filter,contractPayload:{updates:{title:"Exhausted"}}}});
+    const schedule=await schedules.createSchedule({authContext,firstRunAt:now,template:{filter,contractPayload:{writeCapabilityVersion:WRITE_CAPABILITY_VERSION,updates:{title:"Exhausted"}}}});
     const occurrence=(await schedules.triggerDueSchedules({now}))[0];
     await pool.query("UPDATE mirror.schedule_occurrences SET status='RUNNING',attempts=8,lease_token='crashed',lease_until=now()-interval '1 second' WHERE id=$1",[occurrence.id]);
     assert.equal((await schedules.processNextOccurrence()).kind,"EMPTY");
     assert.equal((await pool.query("SELECT status FROM mirror.schedule_occurrences WHERE id=$1",[occurrence.id])).rows[0].status,"FAILED");
     const foreign=createSchedulesService({workerDatabase:profiles.operationWorker,database:merchant,resolveShop:async()=>"other.myshopify.com"});
-    assert.equal(await foreign.cancelOccurrence({authContext:{},occurrenceId:occurrence.id}),false);
-    assert.equal(await schedules.cancelOccurrence({authContext,occurrenceId:occurrence.id}),true);
+    await assert.rejects(()=>foreign.cancelOccurrence({authContext:{},occurrenceId:occurrence.id}),{code:"FIELD_PERMISSION_DENIED"});
+    assert.equal(await schedules.cancelOccurrence({authContext,occurrenceId:occurrence.id}),false);
     await pool.query("UPDATE mirror.job_schedules SET enabled=false WHERE id=$1",[schedule.id]);
   });
 
@@ -297,14 +352,14 @@ export async function testSelection(t, pool, { onlyDispatch = false } = {}) {
     const selections=createSelectionService({database:merchant,catalogQueryService:catalog,resolveShop:authentication.resolveShop});
     const schedules=createSchedulesService({workerDatabase:profiles.operationWorker,database:merchant,catalogQueryService:catalog,resolveShop:authentication.resolveShop,selectionService:selections});
     const schedule=await schedules.createSchedule({authContext,freezeTargetsOnCreation:true,enabled:false,
-      template:{filter,contractPayload:{updates:{title:"Frozen"}}}});
+      template:{filter,contractPayload:{writeCapabilityVersion:WRITE_CAPABILITY_VERSION,updates:{title:"Frozen"}}}});
     const stored=(await pool.query("SELECT template FROM mirror.job_schedules WHERE shop_id=$1 AND id=$2",[shopId,schedule.id])).rows[0];
     const snapshot=await selections.getSelectionSnapshot({authContext,snapshotId:stored.template.frozenSnapshotId});
     assert.equal(snapshot.status,"APPROVED");assert.equal(snapshot.selectedCount,205);
     const before=await countSnapshots();
     const denied=createSchedulesService({workerDatabase:profiles.operationWorker,database:merchant,catalogQueryService:catalog,resolveShop:authentication.resolveShop,selectionService:{
       withSelectionTransaction:(options,callback)=>selections.withSelectionTransaction(options,scope=>callback({...scope,client:{async query(){throw new Error("schedule write failed");}}}))}});
-    await assert.rejects(()=>denied.createSchedule({authContext,freezeTargetsOnCreation:true,template:{filter,contractPayload:{updates:{title:"Failed"}}}}),/schedule write failed/);
+    await assert.rejects(()=>denied.createSchedule({authContext,freezeTargetsOnCreation:true,template:{filter,contractPayload:{writeCapabilityVersion:WRITE_CAPABILITY_VERSION,updates:{title:"Failed"}}}}),/schedule write failed/);
     assert.equal(await countSnapshots(),before);
   });
 
@@ -396,7 +451,7 @@ export async function testSelection(t, pool, { onlyDispatch = false } = {}) {
   await t.test("revocation on a later page leaves no partial snapshot", async () => {
     const before = await countSnapshots();
     const service = wrap(async ({ page }) => { if (page === 1) active = false; });
-    try { await assert.rejects(() => select(service), /session expired or revoked/); }
+    try { await assert.rejects(() => select(service), {code:"FIELD_PERMISSION_DENIED"}); }
     finally { active = true; }
     assert.equal(await countSnapshots(), before);
   });

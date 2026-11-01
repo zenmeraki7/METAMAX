@@ -22,6 +22,7 @@
     "test:postgres": "node scripts/test-filter-postgres.js",
     "test:phase1:postgres": "node scripts/test-filter-postgres.js --phase1",
     "test:sync-progress:postgres": "node scripts/test-filter-postgres.js --sync-progress",
+    "test:roles:postgres": "node scripts/test-filter-postgres.js --roles",
     "test:schema": "node scripts/test-filter-postgres.js --schema",
     "test:operations": "node scripts/test-filter-postgres.js --operations",
     "test:exports": "node scripts/test-filter-postgres.js --exports",

@@ -6,7 +6,9 @@ import { readFileSync, writeFileSync } from "node:fs";
 
 const file = new URL("../prisma-live/schema.prisma", import.meta.url);
 const source = readFileSync(file, "utf8");
-const normalized = source.replace(/model generations \{[\s\S]*?\n\}/, block =>
+const normalized = source.replace(/model changes \{[\s\S]*?\n\}/, block =>
+  block.replace(/^(\s+snapshots\s+)snapshots\?/m, "$1snapshots[]"),
+).replace(/model generations \{[\s\S]*?\n\}/, block =>
   block.replace(/^(\s+publications\s+)publications\?/m, "$1publications[]"),
 ).replace(/model job_items \{[\s\S]*?\n\}/, block =>
   // Re-introspection can reuse the edit-operation field name and FK map for

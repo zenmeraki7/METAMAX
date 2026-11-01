@@ -58,6 +58,7 @@ export async function verifyRuntimeDatabase(client,{profile='merchant'}={}){
     const metadataOnly=!table.can_insert&&!table.can_delete&&table.can_update&&table.update_columns?.length>0&&table.update_columns.every(column=>limitedColumns.includes(column));
     if(table.nspname!=='mirror'||!expected.write.includes(table.relname)&&!metadataOnly)throw Error('Database profile has excess DML privileges');
     if(profile==='operationWorker'&&table.can_delete)throw Error('Operation worker must not delete durable work');
+    if(profile==='operationWorker'&&table.nspname==='mirror'&&table.relname==='job_commands'&&table.can_insert)throw Error('Operation worker must not create commands');
   }
   for(const table of tables.filter(t=>t.tenant_owned||t.relname==='shops')){
     const scoped=policies.filter(p=>String(p.polrelid)===String(table.oid));

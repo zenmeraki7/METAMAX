@@ -21,7 +21,7 @@ import { testWebhookRefresh } from './webhook-refresh.js';
 export async function testCatalogPhases(t,pool) {
   const password=randomBytes(24).toString('hex');
   await pool.query(`CREATE ROLE phase_engine_runtime LOGIN PASSWORD '${password}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`);
-  await pool.query('GRANT metamax_engine_runtime TO phase_engine_runtime');
+  await pool.query('GRANT metamax_catalog_worker TO phase_engine_runtime');
   const url=new URL(process.env.FILTER_TEST_DATABASE_URL);url.username='phase_engine_runtime';url.password=password;
   const enginePool=new pg.Pool({connectionString:url.href,max:10});
   try {
@@ -63,7 +63,7 @@ export async function testCatalogPhases(t,pool) {
     const start=Number(/^bytes=(\d+)-/.exec(headers.Range)[1]),end=Math.min(bytes.length-1,start+1048575);
     return {ok:true,status:206,headers:new Headers({etag:'"fixture-export"','content-range':`bytes ${start}-${end}/${bytes.length}`}),body:Readable.from([bytes.subarray(start,end+1)],{objectMode:false})};
   };
-  const options={database:createVerifiedRuntimePool(enginePool),shopify,clientFactory,fetchImpl,logger:{info(){},error(){}}};
+  const options={database:createVerifiedRuntimePool(enginePool,{profile:"catalogWorker"}),shopify,clientFactory,fetchImpl,logger:{info(){},error(){}}};
   const runtime=await createCatalogPhaseRuntime(options);
   await t.test('physical schema revalidation batches all domain metadata into three network reads',async()=>{
     let metadataQueries=0;
@@ -84,6 +84,15 @@ export async function testCatalogPhases(t,pool) {
     for(let i=0;i<max;i++){await makeDue(id);await runtime.processOne();const row=await state(id);if(row.completed_at||row.review_required||row.cancel_requested)return row;}
     return state(id);
   }
+  // The global scanner may first service another test's due cancellation.
+  // Wait for this job's actual result rather than assuming UUID service order.
+  async function processJob(id){
+    for(let turn=0;turn<64;turn++){
+      await makeDue(id);const result=await runtime.processOne();
+      if(result?.id===id)return result;
+    }
+    assert.fail('Target job was not serviced within the bounded fixture budget');
+  }
   async function ledgerFixture(name) {
     const s=fixture(name),job=await service.enqueue(s.session);
     const mapping=await verifySyncRunDbMapping({database:pool,mapping:CATALOG_EXECUTION_MAPPING});
@@ -95,7 +104,7 @@ export async function testCatalogPhases(t,pool) {
   await testInstallSync(t,{pool,fixture,service,runtime,state,makeDue,shopify,sessions,options});
   await t.test('missing, mismatched and CANCELING cleanup results remain pending until exact terminal observation',async()=>{
     for(const mode of ['missing','mismatch','canceling']){
-      const s=fixture('cleanup-contract-'+mode),job=await service.enqueue(s.session);
+      const s=fixture('cleanup-contract-'+mode);s.pending=true;const job=await service.enqueue(s.session);
       await runtime.processOne();
       s.cancelResponse={data:{bulkOperationCancel:mode==='missing'?null:{userErrors:[],bulkOperation:{id:mode==='mismatch'?'gid://shopify/BulkOperation/999999':s.operationId,status:'CANCELING'}}}};
       await service.cancel(s.session,job.id);
@@ -293,13 +302,13 @@ export async function testCatalogPhases(t,pool) {
     s.onCancel=async()=>{
       await pool.query("UPDATE mirror.catalog_import_executions SET fence=fence+1,lease_token='superseded' WHERE id=$1",[job.id]);
     };
-    await pool.query("UPDATE mirror.catalog_import_executions SET outcome_uncertain=false,last_error=NULL WHERE id=$1",[job.id]);
+    await pool.query("UPDATE mirror.catalog_import_executions SET outcome_uncertain=false,last_error=NULL,next_eligible_at=clock_timestamp() WHERE id=$1",[job.id]);
     const staleResult=await runtime.processOne();
     assert.equal(staleResult.kind,'STALE_CLAIM');
     assert.equal((await state(job.id)).cancel_completed_at,null);
     // Next pass reconciles remote CANCELLED status via BULK_STATUS_QUERY and completes cancellation.
     s.onCancel=null;
-    await pool.query("UPDATE mirror.catalog_import_executions SET outcome_uncertain=true,last_error='REMOTE_CANCEL_OUTCOME_UNKNOWN',lease_token=NULL,lease_until=NULL WHERE id=$1",[job.id]);
+    await pool.query("UPDATE mirror.catalog_import_executions SET outcome_uncertain=true,last_error='REMOTE_CANCEL_OUTCOME_UNKNOWN',lease_token=NULL,lease_until=NULL,next_eligible_at=clock_timestamp() WHERE id=$1",[job.id]);
     const cancelsBefore=s.cancels;
     const completedCancel=await runtime.processOne();
     assert.equal(completedCancel.kind,'CANCELLED');
@@ -360,12 +369,12 @@ export async function testCatalogPhases(t,pool) {
     const s=fixture('phase-recovery-shutdown');const job=await service.enqueue(s.session);await runtime.processOne();
     await pool.query(`UPDATE mirror.catalog_import_executions SET outcome_uncertain=true,next_eligible_at=clock_timestamp() WHERE id=$1`,[job.id]);
     const started=Promise.withResolvers(),pending=Promise.withResolvers();s.onStatus=()=>{started.resolve();return pending.promise;};
-    const recovering=runtime.processOne();await started.promise;runtime.stop();
+    const recovering=processJob(job.id);await started.promise;const stopped=runtime.stop();
     assert.equal((await recovering).kind,'RECOVERY_DEFERRED');
     assert.equal((await state(job.id)).last_error,'VERIFICATION_ABORTED');
-    s.onStatus=null;pending.resolve();await Promise.resolve();
+    s.onStatus=null;pending.resolve();await stopped;
     assert.equal((await state(job.id)).outcome_uncertain,true);
-    runtime.start();await makeDue(job.id);assert.equal((await runtime.processOne()).kind,'RESUMED');
+    runtime.start();assert.equal((await processJob(job.id)).kind,'RESUMED');
     assert.ok((await drain(job.id)).completed_at);assert.equal(s.starts,1);
   });
   await t.test('a second recovery runtime cannot verify or consume another attempt while the first owns the lease',async()=>{
@@ -373,12 +382,12 @@ export async function testCatalogPhases(t,pool) {
     await pool.query(`UPDATE mirror.catalog_import_executions SET outcome_uncertain=true,next_eligible_at=clock_timestamp() WHERE id=$1`,[job.id]);
     const started=Promise.withResolvers(),pending=Promise.withResolvers();let verifications=0;
     s.onStatus=()=>{verifications++;started.resolve();return pending.promise;};
-    const recovering=runtime.processOne();await started.promise;
+    const recovering=processJob(job.id);await started.promise;
     const second=await createCatalogPhaseRuntime(options);assert.equal(await second.processOne(),null);
     assert.equal((await state(job.id)).recovery_attempts,1);assert.equal(verifications,1);
     s.onStatus=null;pending.resolve();assert.equal((await recovering).kind,'RESUMED');
     assert.ok((await drain(job.id)).completed_at);assert.equal(s.starts,1);
   });
-  await testSyncRecoveryRepository(t,{pool,fixture,service,runtime,state,makeDue,drain});
+  await testSyncRecoveryRepository(t,{pool,fixture,service,runtime,state,makeDue,drain,processJob});
   }finally{await enginePool.end();await pool.query('DROP OWNED BY phase_engine_runtime');await pool.query('DROP ROLE phase_engine_runtime');}
 }

@@ -1,3 +1,4 @@
+import {createShopifyAuthMiddleware,createInstallationGuard} from '../../middleware/shopify-auth.js';
 import {createDatabaseInstallationResolver} from '../../security/installation-lifecycle.server.js';
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
@@ -10,7 +11,8 @@ export async function testHistoryHttp(t,pool) {
   const shop='audit-history.myshopify.com',other='audit-history-other.myshopify.com',installation='history-current';
   await pool.query('INSERT INTO mirror.shops(id,installation_version) VALUES($1,$2),($3,$2)',[shop,installation,other]);
   const sessions=new Map([shop,other].map(shop=>[shop,{id:`offline_${shop}`,shop,isOnline:false,scope:'read_products',accessToken:'test'}]));
-  const authentication=createFilterAuthentication({resolveInstallation:createDatabaseInstallationResolver({database:pool}),sessionStorage:{loadSession:async id=>[...sessions.values()].find(s=>s.id===id)}});
+  const sessionStorage={loadSession:async id=>[...sessions.values()].find(s=>s.id===id)};
+  const authentication=createFilterAuthentication({resolveInstallation:createDatabaseInstallationResolver({database:pool}),sessionStorage});
   const secret='history-test-cursor-key-with-32-bytes-minimum';
   async function operation(shopId,install=installation,purged=false) {
     const id=randomUUID();
@@ -32,6 +34,10 @@ export async function testHistoryHttp(t,pool) {
 
   const app=express();
   app.use((req,res,next)=>{res.locals.shopify={session:sessions.get(req.headers['x-test-shop']??shop)};next();});
+  // Exercise the same stored-session and installation guards as production.
+  // The official middleware's wire verification is a test-owned transport seam.
+  app.use(createShopifyAuthMiddleware({shopify:{validateAuthenticatedSession:()=> (_req,_res,next)=>next()}}));
+  app.use(createInstallationGuard({database:pool,sessionStorage}));
   app.use(authentication.capture);
   app.use('/history',createHistoryRouter({database:pool,authentication,cursorSecret:secret,logger:{error(){}}}));
   const denied=createHistoryReadService({database:pool,authentication,cursorSecret:secret,authorizeHistoryRead:async()=>false});

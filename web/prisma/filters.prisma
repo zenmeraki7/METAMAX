@@ -3,13 +3,12 @@
 // A reusable semantic recipe, never a persisted authorization grant. Validate
 // the AST through the configured Field/Filter services on every use.
 model SavedFilter {
-  shopId      String   @map("shop_id") @db.Text
-  id          String   @default(uuid()) @db.Text
-  name        String   @db.Text
+  shopId      String   @map("shop_id")
+  id          String   @default(uuid())
+  name        String
   astVersion  Int      @map("ast_version")
-  ast         Json     @db.JsonB
-  // Structural fingerprint only; always re-resolve/authorize before compilation.
-  fingerprint String   @db.Text
+  ast         Json
+  fingerprint String
   updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
   merchant    Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
 

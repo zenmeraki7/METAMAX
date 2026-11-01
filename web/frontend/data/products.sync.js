@@ -28,7 +28,7 @@ export function catalogNotice(status, hasCatalog) {
     message: `${stages[status] ?? "Syncing your catalog from Shopify."} ${
       hasCatalog
         ? "Your last published catalog is available below."
-        : "Your products will appear here automatically when ready."
+        : "Saved products appear below during sync. Editing unlocks after sync completes."
     }`,
   };
 }

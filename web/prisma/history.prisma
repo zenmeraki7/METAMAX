@@ -2,76 +2,291 @@
 // Models map directly to the immutable edit_history PostgreSQL tables.
 
 model HistoryOperation {
-  id                         String    @id @default(uuid()) @db.Uuid
-  shopId                     String    @map("shop_id") @db.Text
-  installationId             String    @map("installation_id") @db.Text
-  executionJobId             BigInt    @map("execution_job_id")
-  editOperationId            BigInt?   @map("edit_operation_id")
-  executionContractId        String?   @map("execution_contract_id") @db.Text
-  contractVersion            Int       @default(3) @map("contract_version")
-  fingerprintScheme          String    @default("metamax-history-sha256-v3") @map("fingerprint_scheme") @db.Text
-  operationKind              String    @map("operation_kind") @db.Text
-  operationState             String    @default("RECORDING") @map("operation_state") @db.Text
-  executionFingerprint       String    @map("execution_fingerprint") @db.Text
-  filterFingerprint          String?   @map("filter_fingerprint") @db.Text
-  approvedContractFingerprint String?  @map("approved_contract_fingerprint") @db.Text
-  fieldMappingVersion        String?   @map("field_mapping_version") @db.Text
-  actorType                  String    @default("SYSTEM") @map("actor_type") @db.Text
-  actorReference             String?   @map("actor_reference") @db.Text
-  changesRecorded            BigInt    @default(0) @map("changes_recorded")
-  changesVerified            BigInt    @default(0) @map("changes_verified")
-  changesFailed              BigInt    @default(0) @map("changes_failed")
-  changesUncertain           BigInt    @default(0) @map("changes_uncertain")
-  createdAt                  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt                  DateTime  @default(now()) @map("updated_at") @db.Timestamptz(3)
-  completedAt                DateTime? @map("completed_at") @db.Timestamptz(3)
-  retainedUntil              DateTime? @map("retained_until") @db.Timestamptz(3)
-  purgeRequestedAt           DateTime? @map("purge_requested_at") @db.Timestamptz(3)
-  legalHold                  Boolean   @default(false) @map("legal_hold")
+  id                          String                   @id @default(uuid()) @db.Uuid
+  shopId                      String                   @map("shop_id")
+  installationId              String                   @map("installation_id")
+  executionJobId              BigInt                   @map("execution_job_id")
+  editOperationId             BigInt?                  @map("edit_operation_id")
+  executionContractId         String?                  @map("execution_contract_id")
+  contractVersion             Int                      @default(3) @map("contract_version")
+  fingerprintScheme           String                   @default("metamax-history-sha256-v3") @map("fingerprint_scheme")
+  operationKind               String                   @map("operation_kind")
+  operationState              String                   @default("RECORDING") @map("operation_state")
+  executionFingerprint        String                   @map("execution_fingerprint")
+  filterFingerprint           String?                  @map("filter_fingerprint")
+  approvedContractFingerprint String?                  @map("approved_contract_fingerprint")
+  fieldMappingVersion         String?                  @map("field_mapping_version")
+  actorType                   String                   @default("SYSTEM") @map("actor_type")
+  actorReference              String?                  @map("actor_reference")
+  changesRecorded             BigInt                   @default(0) @map("changes_recorded")
+  changesVerified             BigInt                   @default(0) @map("changes_verified")
+  changesFailed               BigInt                   @default(0) @map("changes_failed")
+  changesUncertain            BigInt                   @default(0) @map("changes_uncertain")
+  createdAt                   DateTime                 @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(6)
+  updatedAt                   DateTime                 @default(dbgenerated("clock_timestamp()")) @map("updated_at") @db.Timestamptz(6)
+  completedAt                 DateTime?                @map("completed_at") @db.Timestamptz(6)
+  retainedUntil               DateTime?                @default(dbgenerated("(clock_timestamp() + '30 days'::interval)")) @map("retained_until") @db.Timestamptz(6)
+  legalHold                   Boolean                  @default(false) @map("legal_hold")
+  purgeRequestedAt            DateTime?                @map("purge_requested_at") @db.Timestamptz(6)
+  purgeAttempts              Int                      @default(0) @map("purge_attempts")
+  purgeNextAttemptAt       DateTime?                @db.Timestamptz(6) @map("purge_next_attempt_at")
+  purgeReviewRequired       Boolean                  @default(false) @map("purge_review_required")
+  encryptionReviewRequired  Boolean                  @default(false) @map("encryption_review_required")
+  changes                     HistoryChange[]
+  mutation_requests           HistoryMutationRequest[]
+  recoveryTasks              HistoryRecoveryTask[]
+  undoRequests               HistoryUndoRequest[]
 
-  @@index([shopId, createdAt])
-  @@index([shopId, executionJobId])
+  @@unique([shopId, installationId, executionJobId], map: "eh_op_execution_unique")
+  @@unique([shopId, installationId, id], map: "eh_op_tenant_key")
+  @@index([shopId, installationId, executionContractId], map: "eh_op_contract_idx", where: raw("(execution_contract_id IS NOT NULL)"))
+  @@index([shopId, installationId, editOperationId], map: "eh_op_edit_idx", where: raw("(edit_operation_id IS NOT NULL)"))
+  @@index([shopId, installationId, createdAt(sort: Desc), id(sort: Desc)], map: "eh_op_history_idx")
+  @@index([retainedUntil, id], map: "eh_op_retention_idx", where: raw("((retained_until IS NOT NULL) AND (legal_hold = false))"))
+  @@index([retainedUntil, createdAt, id], map: "eh_retention_due", where: raw("(NOT legal_hold)"))
   @@map("operations")
   @@schema("edit_history")
 }
 
 model HistoryMutationRequest {
-  id                   String    @id @default(uuid()) @db.Uuid
-  shopId               String    @map("shop_id") @db.Text
-  installationId       String    @map("installation_id") @db.Text
-  operationId          String    @map("operation_id") @db.Uuid
-  executionItemId      BigInt    @map("execution_item_id")
-  mutationId           String    @map("mutation_id") @db.Uuid
-  attemptId            String    @map("attempt_id") @db.Uuid
-  attemptNumber        Int       @default(1) @map("attempt_number")
-  requestState         String    @default("PREPARED") @map("request_state") @db.Text
-  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt            DateTime  @default(now()) @map("updated_at") @db.Timestamptz(3)
+  id                            String           @id @default(uuid()) @db.Uuid
+  shopId                        String           @map("shop_id")
+  installationId                String           @map("installation_id")
+  operationId                   String           @map("operation_id") @db.Uuid
+  mutationId                    String           @map("mutation_id")
+  attemptId                     String           @map("attempt_id")
+  attemptNumber                 Int              @map("attempt_number")
+  executionItemId               BigInt           @map("execution_item_id")
+  executionFenceEpoch         BigInt @map("execution_fence_epoch")
+  executionClaimId            String @map("execution_claim_id")
+  mutationPlanFingerprint     String @map("mutation_plan_fingerprint")
+  requestFingerprint           String @map("request_fingerprint")
+  resourceFieldSet            Json @map("resource_field_set")
+  fieldCount                   Int @map("field_count")
+  requestState                  String           @default("PREPARED") @map("request_state")
+  dispatchHandoffKey          String @map("dispatch_handoff_key")
+  dispatchEvidenceFingerprint String? @map("dispatch_evidence_fingerprint")
+  outcomeEvidenceFingerprint  String? @map("outcome_evidence_fingerprint")
+  outcomeEvidenceKind         String? @map("outcome_evidence_kind")
+  preparedAt                   DateTime         @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6) @map("prepared_at")
+  dispatchAuthorizedAt        DateTime?        @db.Timestamptz(6) @map("dispatch_authorized_at")
+  acknowledgedAt               DateTime?        @db.Timestamptz(6) @map("acknowledged_at")
+  verifiedAt                   DateTime?        @db.Timestamptz(6) @map("verified_at")
+  createdAt                     DateTime         @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(6)
+  updatedAt                     DateTime         @default(dbgenerated("clock_timestamp()")) @map("updated_at") @db.Timestamptz(6)
+  dispatchTokenHash           String? @map("dispatch_token_hash")
+  dispatchConsumedAt          DateTime?        @db.Timestamptz(6) @map("dispatch_consumed_at")
+  operations                    HistoryOperation @relation(fields: [shopId, installationId, operationId], references: [shopId, installationId, id], onUpdate: NoAction, map: "eh_request_operation_fk")
 
-  @@unique([shopId, operationId, mutationId, attemptId])
-  @@index([shopId, operationId, executionItemId])
+  @@unique([shopId, installationId, operationId, mutationId, attemptId], map: "eh_request_attempt_unique")
+  @@unique([shopId, installationId, dispatchHandoffKey], map: "eh_request_handoff_unique")
+  @@unique([shopId, installationId, operationId, mutationId, attemptNumber], map: "eh_request_number_unique")
+  @@unique([shopId, installationId, operationId, id], map: "eh_request_operation_key")
+  @@unique([shopId, installationId, id], map: "eh_request_tenant_key")
+  @@index([shopId, installationId, operationId, createdAt(sort: Desc), id], map: "eh_request_operation_idx")
+  @@index([updatedAt, id], map: "eh_request_recovery_idx", where: raw("(request_state = ANY (ARRAY['DISPATCH_AUTHORIZED'::text, 'OUTCOME_UNKNOWN'::text, 'ACKNOWLEDGED'::text]))"))
+  @@index([shopId, installationId, operationId], map: "eh_unresolved_execution_idx", where: raw("(request_state = ANY (ARRAY['DISPATCH_AUTHORIZED'::text, 'ACKNOWLEDGED'::text, 'OUTCOME_UNKNOWN'::text]))"))
+  @@index([shopId, installationId, executionItemId, operationId], map: "eh_verified_execution_item_idx", where: raw("(request_state = 'VERIFIED'::text)"))
   @@map("mutation_requests")
   @@schema("edit_history")
 }
 
 model HistoryChange {
-  id                   String    @id @default(uuid()) @db.Uuid
-  shopId               String    @map("shop_id") @db.Text
-  installationId       String    @map("installation_id") @db.Text
-  operationId          String    @map("operation_id") @db.Uuid
-  executionItemId      BigInt    @map("execution_item_id")
-  mutationId           String    @map("mutation_id") @db.Uuid
-  attemptId            String    @map("attempt_id") @db.Uuid
-  attemptNumber        Int       @default(1) @map("attempt_number")
-  resourceGid          String    @map("resource_gid") @db.Text
-  fieldId              String    @map("field_id") @db.Text
-  mutationState        String    @default("PREPARED") @map("mutation_state") @db.Text
-  verificationState    String    @default("UNVERIFIED") @map("verification_state") @db.Text
-  preparedAt           DateTime  @default(now()) @map("prepared_at") @db.Timestamptz(3)
+  id                          String           @id @default(uuid()) @db.Uuid
+  shopId                      String           @map("shop_id")
+  installationId              String           @map("installation_id")
+  operationId                 String           @map("operation_id") @db.Uuid
+  executionItemId             BigInt           @map("execution_item_id")
+  mutationId                  String           @map("mutation_id")
+  attemptId                   String           @map("attempt_id")
+  attemptNumber               Int              @map("attempt_number")
+  executionFenceEpoch       BigInt @map("execution_fence_epoch")
+  executionClaimId          String @map("execution_claim_id")
+  resourceGid                 String           @map("resource_gid")
+  resourceFamilyGid         String @map("resource_family_gid")
+  fieldId                     String           @map("field_id")
+  fieldDefinitionRevision   String @map("field_definition_revision")
+  mutationPlanFingerprint   String @map("mutation_plan_fingerprint")
+  intendedValueFingerprint  String @map("intended_value_fingerprint")
+  beforeSnapshotFingerprint String @map("before_snapshot_fingerprint")
+  mutationState               String           @default("PREPARED") @map("mutation_state")
+  verificationState           String           @default("NOT_CHECKED") @map("verification_state")
+  lastEvidenceKind          String? @map("last_evidence_kind")
+  lastEvidenceFingerprint   String? @map("last_evidence_fingerprint")
+  outcomeCode                String? @map("outcome_code")
+  preparedAt                  DateTime         @default(dbgenerated("clock_timestamp()")) @map("prepared_at") @db.Timestamptz(6)
+  dispatchStartedAt         DateTime?        @db.Timestamptz(6) @map("dispatch_started_at")
+  acknowledgedAt             DateTime?        @db.Timestamptz(6) @map("acknowledged_at")
+  verifiedAt                 DateTime?        @db.Timestamptz(6) @map("verified_at")
+  updatedAt                  DateTime         @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6) @map("updated_at")
+  operations                  HistoryOperation @relation(fields: [shopId, installationId, operationId], references: [shopId, installationId, id], onUpdate: NoAction, map: "eh_change_operation_fk")
+  recoveryTasks              HistoryRecoveryTask[]
+  snapshots                         HistorySnapshot[]
 
-  @@index([shopId, operationId, preparedAt])
-  @@index([shopId, resourceGid])
+  @@unique([shopId, installationId, operationId, mutationId, attemptNumber, resourceGid, fieldId], map: "eh_change_attempt_number_resource_field_unique")
+  @@unique([shopId, installationId, operationId, mutationId, attemptId, resourceGid, fieldId], map: "eh_change_attempt_resource_field_unique")
+  @@unique([shopId, installationId, operationId, id], map: "eh_change_operation_key")
+  @@unique([shopId, installationId, id], map: "eh_change_tenant_key")
+  @@index([shopId, installationId, executionItemId], map: "eh_change_execution_item_idx")
+  @@index([shopId, installationId, resourceFamilyGid, preparedAt(sort: Desc)], map: "eh_change_family_idx")
+  @@index([shopId, installationId, operationId, preparedAt, id], map: "eh_change_operation_idx")
+  @@index([shopId, installationId, resourceGid, preparedAt(sort: Desc), id(sort: Desc)], map: "eh_change_resource_idx")
+  @@index([shopId, installationId, updatedAt, id], map: "eh_change_unknown_idx", where: raw("(mutation_state = 'OUTCOME_UNKNOWN'::text)"))
+  @@index([shopId, installationId, operationId, resourceGid, fieldId, preparedAt(sort: Desc), attemptNumber(sort: Desc), id(sort: Desc)], map: "eh_undo_source_read_idx")
+  @@index([shopId, resourceFamilyGid], map: "eh_unresolved_family_idx", where: raw("(mutation_state = ANY (ARRAY['DISPATCHING'::text, 'OUTCOME_UNKNOWN'::text, 'ACKNOWLEDGED'::text]))"))
   @@map("changes")
   @@schema("edit_history")
 }
 
+model HistoryPrivacyScope {
+  shopId             String @map("shop_id")
+  installationId     String @map("installation_id")
+  uninstalledAt      DateTime  @db.Timestamptz(6) @map("uninstalled_at")
+  redactRequestedAt DateTime? @db.Timestamptz(6) @map("redact_requested_at")
+  completedAt        DateTime? @db.Timestamptz(6) @map("completed_at")
+  reviewRequired     Boolean   @default(false) @map("review_required")
+
+  @@id([shopId, installationId])
+  @@map("privacy_scopes")
+  @@schema("edit_history")
+}
+
+model HistoryPurgeReceipt {
+  scopeDigest String @map("scope_digest")
+  operationId String   @db.Uuid @map("operation_id")
+  reason       String
+  purgedAt    DateTime @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6) @map("purged_at")
+  expiresAt   DateTime @default(dbgenerated("(clock_timestamp() + '30 days'::interval)")) @db.Timestamptz(6) @map("expires_at")
+
+  @@id([scopeDigest, operationId])
+  @@map("purge_receipts")
+  @@schema("edit_history")
+}
+
+model HistoryRecoveryTask {
+  id                   String           @id @db.Uuid
+  shopId              String @map("shop_id")
+  installationId      String @map("installation_id")
+  operationId         String           @db.Uuid @map("operation_id")
+  changeId            String?          @db.Uuid @map("change_id")
+  undoRequestId      String?          @db.Uuid @map("undo_request_id")
+  taskKind            String @map("task_kind")
+  taskState           String           @default("PENDING") @map("task_state")
+  dedupeKey           String @map("dedupe_key")
+  evidenceFingerprint String? @map("evidence_fingerprint")
+  lastErrorCode      String? @map("last_error_code")
+  attemptCount        Int              @default(0) @map("attempt_count")
+  maxAttempts         Int              @default(20) @map("max_attempts")
+  availableAt         DateTime         @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6) @map("available_at")
+  claimedBy           String? @map("claimed_by")
+  claimToken          String?          @db.Uuid @map("claim_token")
+  fenceEpoch          BigInt           @default(0) @map("fence_epoch")
+  claimExpiresAt     DateTime?        @db.Timestamptz(6) @map("claim_expires_at")
+  lastCheckedAt      DateTime?        @db.Timestamptz(6) @map("last_checked_at")
+  createdAt           DateTime         @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6) @map("created_at")
+  updatedAt           DateTime         @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6) @map("updated_at")
+  completedAt         DateTime?        @db.Timestamptz(6) @map("completed_at")
+  changes              HistoryChange?   @relation(fields: [shopId, installationId, operationId, changeId], references: [shopId, installationId, operationId, id], onUpdate: NoAction, map: "eh_recovery_change_fk")
+  operations           HistoryOperation @relation(fields: [shopId, installationId, operationId], references: [shopId, installationId, id], onUpdate: NoAction, map: "eh_recovery_operation_fk")
+  HistoryUndoRequest        HistoryUndoRequest?   @relation(fields: [shopId, installationId, operationId, undoRequestId], references: [shopId, installationId, originalOperationId, id], onUpdate: NoAction, map: "eh_recovery_undo_fk")
+
+  @@unique([shopId, installationId, taskKind, dedupeKey], map: "eh_recovery_dedupe")
+  @@unique([shopId, installationId, id], map: "eh_recovery_tenant_key")
+  @@index([shopId, installationId, changeId], map: "eh_recovery_change_idx", where: raw("(change_id IS NOT NULL)"))
+  @@index([claimExpiresAt, id], map: "eh_recovery_expired_idx", where: raw("(task_state = 'RECONCILING'::text)"))
+  @@index([shopId, installationId, operationId], map: "eh_recovery_operation_idx")
+  @@index([availableAt, createdAt, id], map: "eh_recovery_ready_idx", where: raw("(task_state = ANY (ARRAY['PENDING'::text, 'RETRY_WAIT'::text]))"))
+  @@index([shopId, installationId, undoRequestId], map: "eh_recovery_undo_idx", where: raw("(undo_request_id IS NOT NULL)"))
+  @@map("recovery_tasks")
+  @@schema("edit_history")
+}
+
+model HistorySnapshot {
+  id                              String        @id @db.Uuid
+  shopId                         String @map("shop_id")
+  installationId                 String @map("installation_id")
+  operationId                    String        @db.Uuid @map("operation_id")
+  changeId                       String        @db.Uuid @map("change_id")
+  snapshotVersion                Int           @default(3) @map("snapshot_version")
+  fingerprintScheme              String        @default("metamax-history-sha256-v3") @map("fingerprint_scheme")
+  snapshotKind                   String @map("snapshot_kind")
+  valueKind                      String @map("value_kind")
+  valueEncoding                  String        @default("JSONB") @map("value_encoding")
+  valueJson                      Json? @map("value_json")
+  encryptedValue                 Bytes? @map("encrypted_value")
+  encryptionKeyReference        String? @map("encryption_key_reference")
+  snapshotFingerprint            String @map("snapshot_fingerprint")
+  evidenceBindingFingerprint    String @map("evidence_binding_fingerprint")
+  observationId                  String @map("observation_id")
+  observationSource              String @map("observation_source")
+  observedAt                     DateTime      @db.Timestamptz(6) @map("observed_at")
+  sourceRevision                 String? @map("source_revision")
+  observationReceiptId          String @map("observation_receipt_id")
+  observationReceiptFingerprint String @map("observation_receipt_fingerprint")
+  fieldDefinitionRevision       String @map("field_definition_revision")
+  bindingMode                    String @map("binding_mode")
+  generationId                   String? @map("generation_id")
+  coverageRevision               String? @map("coverage_revision")
+  mappingVersion                 String? @map("mapping_version")
+  executionSnapshotId           String? @map("execution_snapshot_id")
+  mirrorBeforeSnapshotId       BigInt? @map("mirror_before_snapshot_id")
+  createdAt                      DateTime      @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6) @map("created_at")
+  resourceGid                    String @map("resource_gid")
+  fieldId                        String @map("field_id")
+  filterFingerprint              String @map("filter_fingerprint")
+  executionFingerprint           String @map("execution_fingerprint")
+  fieldResolutionFingerprint    String @map("field_resolution_fingerprint")
+  changes                         HistoryChange @relation(fields: [shopId, installationId, operationId, changeId], references: [shopId, installationId, operationId, id], onUpdate: NoAction, map: "eh_snapshot_change_operation_fk")
+
+  @@unique([shopId, installationId, changeId, snapshotKind, observationId], map: "eh_snapshot_observation_unique")
+  @@unique([shopId, installationId, changeId], map: "eh_snapshot_one_before_idx", where: raw("(snapshot_kind = 'BEFORE'::text)"))
+  @@unique([shopId, installationId, id], map: "eh_snapshot_tenant_key")
+  @@index([shopId, installationId, changeId, observedAt, id], map: "eh_snapshot_change_idx")
+  @@index([operationId, id], map: "eh_snapshot_legacy_encryption", where: raw("((value_kind = 'VALUE'::text) AND (value_encoding = 'JSONB'::text))"))
+  @@index([shopId, installationId, mirrorBeforeSnapshotId], map: "eh_snapshot_mirror_reference_idx", where: raw("(mirror_before_snapshot_id IS NOT NULL)"))
+  @@map("snapshots")
+  @@schema("edit_history")
+}
+
+model HistoryUndoRequest {
+  id                       String           @id @db.Uuid
+  shopId                  String @map("shop_id")
+  installationId          String @map("installation_id")
+  originalOperationId    String           @db.Uuid @map("original_operation_id")
+  idempotencyKey          String @map("idempotency_key")
+  requestFingerprint      String @map("request_fingerprint")
+  undoState               String           @default("REQUESTED") @map("undo_state")
+  conflictPolicy          String           @default("ABORT_ON_CONFLICT") @map("conflict_policy")
+  preflightFingerprint    String? @map("preflight_fingerprint")
+  inversePlanFingerprint String? @map("inverse_plan_fingerprint")
+  approvalReference       String? @map("approval_reference")
+  approvedAt              DateTime?        @db.Timestamptz(6) @map("approved_at")
+  executionJobId         BigInt? @map("execution_job_id")
+  executionContractId    String? @map("execution_contract_id")
+  claimedBy               String? @map("claimed_by")
+  claimToken              String?          @db.Uuid @map("claim_token")
+  fenceEpoch              BigInt           @default(0) @map("fence_epoch")
+  claimExpiresAt         DateTime?        @db.Timestamptz(6) @map("claim_expires_at")
+  retryCount              Int              @default(0) @map("retry_count")
+  nextAttemptAt          DateTime?        @db.Timestamptz(6) @map("next_attempt_at")
+  failureCode             String? @map("failure_code")
+  createdAt               DateTime         @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6) @map("created_at")
+  updatedAt               DateTime         @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6) @map("updated_at")
+  completedAt             DateTime?        @db.Timestamptz(6) @map("completed_at")
+  handoffKey              String @map("handoff_key")
+  resourceGid             String? @map("resource_gid")
+  recoveryTasks           HistoryRecoveryTask[]
+  operations               HistoryOperation @relation(fields: [shopId, installationId, originalOperationId], references: [shopId, installationId, id], onUpdate: NoAction, map: "eh_undo_operation_fk")
+
+  @@unique([shopId, installationId, executionJobId], map: "eh_undo_execution_job_unique", where: raw("(execution_job_id IS NOT NULL)"))
+  @@unique([shopId, installationId, handoffKey], map: "eh_undo_handoff_unique")
+  @@unique([shopId, installationId, idempotencyKey], map: "eh_undo_idempotency")
+  @@unique([shopId, installationId, originalOperationId, id], map: "eh_undo_operation_key")
+  @@unique([shopId, installationId, id], map: "eh_undo_tenant_key")
+  @@index([claimExpiresAt, id], map: "eh_undo_expired_claim_idx", where: raw("(claim_token IS NOT NULL)"))
+  @@index([shopId, installationId, createdAt(sort: Desc), id(sort: Desc)], map: "eh_undo_history_idx")
+  @@index([shopId, installationId, originalOperationId], map: "eh_undo_original_idx")
+  @@index([nextAttemptAt, createdAt, id], map: "eh_undo_ready_idx", where: raw("(undo_state = ANY (ARRAY['REQUESTED'::text, 'PREFLIGHTING'::text, 'SUBMITTING'::text, 'OUTCOME_UNKNOWN'::text]))"))
+  @@map("undo_requests")
+  @@schema("edit_history")
+}

@@ -131,3 +131,28 @@ test('publishing an observed sync refreshes the Products page immediately and on
  await act(async()=>syncCalls()[2].resolve({ok:true,json:async()=>({data:job('SUCCEEDED',100)})}));
  assert.equal(catalogCalls().length,2,'repeated completed status must not trigger duplicate reloads');
 });
+
+test('50 committed preview products appear during sync with selection and editing locked until completion',async t=>{
+ calls=[];
+ await act(async()=>root.render(React.createElement(SyncProgressProvider,null,React.createElement(MemoryRouter,null,React.createElement(ProductsPage)))));
+ const syncCalls=()=>calls.filter(c=>c.url==='/api/mirror/sync');
+ const rows=Array.from({length:50},(_,i)=>({id:`gid://shopify/Product/${i+1}`,title:`Saved product ${i+1}`,status:'ACTIVE',vendor:'Synced vendor',productType:'Preview'}));
+ const pending={...job(),generationId:'live-generation',editingAllowed:false,previewProducts:rows,progress:{...job().progress,productsSaved:'50'}};
+ const reply=async(index,data)=>act(async()=>syncCalls()[index].resolve({ok:true,status:200,json:async()=>({data})}));
+ await reply(0,pending);
+ assert.equal(document.querySelectorAll('s-table-body s-table-row').length,50);
+ assert.match(document.body.textContent,/Saved product 50/);
+ assert.equal(document.querySelectorAll('s-table-body s-link').length,0,'staging rows cannot open the product editor');
+ assert.ok([...document.querySelectorAll('s-table s-checkbox')].every(c=>c.hasAttribute('disabled')));
+ assert.ok(document.querySelector('s-button[slot="primary-action"]').hasAttribute('disabled'));
+ assert.match(document.body.textContent,/Editing is locked/);
+ await act(async()=>t.mock.timers.tick(3000));
+ await reply(1,{...pending,previewProducts:[{...rows[0],title:'Updated while syncing'},...rows.slice(1)],progress:{...pending.progress,productsSaved:'75'}});
+ assert.match(document.body.textContent,/Updated while syncing/);assert.match(document.body.textContent,/75/);
+ await act(async()=>t.mock.timers.tick(3000));
+ await reply(2,{...pending,editingAllowed:true});
+ assert.ok(document.querySelector('s-button[slot="primary-action"]').hasAttribute('disabled'),'a flag cannot unlock a running sync');
+ await act(async()=>t.mock.timers.tick(3000));
+ await reply(3,{...job('SUCCEEDED',100),generationId:'live-generation',editingAllowed:true,previewProducts:[]});
+ assert.equal(document.querySelector('s-button[slot="primary-action"]').hasAttribute('disabled'),false);
+});

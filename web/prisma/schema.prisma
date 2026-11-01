@@ -5,11 +5,12 @@
 // The initial migration includes mandatory custom checks/triggers; see README.md.
 // Storage metadata is never a permission grant or a compiler binding issuer.
 generator client {
-  provider = "prisma-client"
-  output   = "../generated/prisma"
+  provider        = "prisma-client"
+  output          = "../generated/prisma"
+  previewFeatures = ["partialIndexes"]
 }
 
 datasource db {
   provider = "postgresql"
-  schemas  = ["mirror", "export_engine", "edit_history"]
+  schemas  = ["edit_history", "export_engine", "mirror"]
 }

@@ -66,7 +66,7 @@ export async function testProductionExportAdapters(t,pool) {
     const dispatcher=createExportDispatcher({repository,queue,worker,database:pool});
     const service=createExportService({repository,resolveShop:source.resolveShop,resolveExecutionContext:source.resolveExecutionContext,
       fieldService:fieldRuntime.fieldService,filterService:fieldRuntime.compiler});
-    const req={};fieldRuntime.authentication.capture(req,{locals:{shopify:{session}}},()=>{});
+    const req={};await fieldRuntime.authentication.capture(req,{locals:{shopify:{session}}},()=>{});
     const authContext=await fieldRuntime.authentication.authenticate(req);
     for(const format of ["CSV","JSONL","XLSX"]) {
       const request={authContext,idempotencyKey:`export:production-${format}`,input:{format,fieldIds:["product.title","product.tags"]}};
@@ -171,7 +171,7 @@ export async function testProductionExportAdapters(t,pool) {
       await repository.releaseTerminalGenerationProtections();
       assert.equal((await query("SELECT 1 FROM mirror.generation_read_leases WHERE id=$1",[stopped.generation_lease_id])).rowCount,0);
       await assert.rejects(async()=>source.authorizeDownload({authContext,job:await createExportControlAdapter(repository).getJob(common)}),{code:"EXPORT_UNAUTHORIZED"});
-      await assert.rejects(()=>service.create({authContext,idempotencyKey:"export:old-generation-new-install",input:{format:"CSV",fieldIds:["product.title"]}}),{code:"EXPORT_SNAPSHOT_EXPIRED"});
+      await assert.rejects(()=>service.create({authContext,idempotencyKey:"export:old-generation-new-install",input:{format:"CSV",fieldIds:["product.title"]}}),{code:"EXPORT_UNAUTHORIZED"});
     });
     await worker.stop();
   });

@@ -174,24 +174,27 @@ export function createReconciliationService({ database, authorizeWrite }) {
       }, shopId);
     },
     recordMutationEvent: input => recordMutationEvent(input),
+    /** Contract: docs/backend-interface-contracts.md#tenant-scoped-sync-discovery */
     async scanDueDirtyProducts({ shopId, limit = 50 }) {
       shop(shopId);
       integer(limit, 1, 200, "scanner limit");
-      const rows = (
-        await database.query(
-          `SELECT product_id AS "productId",revision,applied_revision AS "appliedRevision",dirty,deleted,attempts,fence
-        FROM mirror.catalog_changes WHERE shop_id=$1 AND dirty AND dead_letter_at IS NULL
-        AND (next_attempt_at IS NULL OR next_attempt_at<=now()) AND (lease_until IS NULL OR lease_until<=now())
-        ORDER BY next_attempt_at ASC NULLS FIRST,product_id LIMIT $2`,
-          [shopId, limit],
-        )
-      ).rows;
-      return rows.map((r) => ({
-        ...r,
-        revision: BigInt(r.revision),
-        appliedRevision: BigInt(r.appliedRevision),
-        fence: BigInt(r.fence),
-      }));
+      return transaction(database, async client => {
+        const rows = (
+          await client.query(
+            `SELECT product_id AS "productId",revision,applied_revision AS "appliedRevision",dirty,deleted,attempts,fence
+          FROM mirror.catalog_changes WHERE shop_id=$1 AND dirty AND dead_letter_at IS NULL
+          AND (next_attempt_at IS NULL OR next_attempt_at<=now()) AND (lease_until IS NULL OR lease_until<=now())
+          ORDER BY next_attempt_at ASC NULLS FIRST,product_id LIMIT $2`,
+            [shopId, limit],
+          )
+        ).rows;
+        return rows.map((r) => ({
+          ...r,
+          revision: BigInt(r.revision),
+          appliedRevision: BigInt(r.appliedRevision),
+          fence: BigInt(r.fence),
+        }));
+      }, shopId);
     },
     async claimDirtyProduct({ shopId, productId, workerId, leaseMs = 30000 }) {
       shop(shopId);

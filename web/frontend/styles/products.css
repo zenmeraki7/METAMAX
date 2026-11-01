@@ -56,6 +56,8 @@
 @media (max-width: 650px) {
   .products-summary__metric { padding: 10px 8px; }
   .products-sync__numbers { margin-inline-start: 0; }
+  .products-sync__details[open] { flex-basis: 100%; }
+  .products-sync__detail-panel { position: static; max-width: 100%; margin-top: 8px; box-shadow: none; }
   .products-toolbar-top {
     grid-template-columns: 110px minmax(0, 1fr);
   }

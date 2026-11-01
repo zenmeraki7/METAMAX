@@ -1,4 +1,4 @@
-import {hasCurrentProductRead} from '../middleware/product-permission.server.js';
+import {hasCurrentProductRead,hasCurrentProductWrite} from '../middleware/product-permission.server.js';
 import { randomUUID } from "node:crypto";
 import { createSyncRunService } from "../mirror/sync-run-service.server.js";
 import { createIngestionWriter } from "../mirror/ingestion-writer.server.js";
@@ -10,6 +10,8 @@ import { catalogImportProgress } from "./catalog-import-progress.server.js";
 import { isValidShopifySession } from "../middleware/session-validation.js";
 import { CatalogImportError, IMPORT_ERROR_CODES as C, withImportErrors } from "./catalog-import-errors.server.js";
 import { requireCatalogImportId } from "./catalog-import-id.server.js";
+import {requestCatalogRefresh} from '../mirror/catalog-refresh.server.js';
+import {lockPublication} from '../mirror/publication-lock.server.js';
 
 function requireImportSession(session, shopId) {
   if (!isValidShopifySession(session) || session.shop !== shopId) {
@@ -27,6 +29,8 @@ const publicJob = row => row && Object.freeze({ id: row.id, status: row.status, 
   ...(row.cancel_requested?{cancellationState:row.status==='CANCELLED'?'CANCELLED':row.last_error==='REMOTE_CANCEL_PENDING'?'CANCELLING':'CANCELLATION_REQUESTED'}:{}),
   retryAt: row.phase ? row.execution_retry_at : row.next_attempt_at, error: row.last_error,
   ...(row.phase ? {phase:row.phase,outcomeUncertain:row.outcome_uncertain,reviewRequired:row.review_required} : {}),
+  editingAllowed: row.editing_allowed === true,
+  previewProducts: Array.isArray(row.preview_products) ? row.preview_products : [],
   progress:catalogImportProgress(row) });
 
 const progressJoins = `LEFT JOIN mirror.catalog_import_executions e ON e.id=j.id AND e.shop_id=j.shop_id AND e.generation_id=j.generation_id
@@ -35,14 +39,40 @@ const progressJoins = `LEFT JOIN mirror.catalog_import_executions e ON e.id=j.id
 const progressColumns = `j.*,e.phase,e.attempt AS execution_attempt,e.next_eligible_at AS execution_retry_at,
   e.outcome_uncertain,e.review_required,r.processed_lines::text,r.expected_lines::text,g.status AS generation_status,
   CASE WHEN g.id IS NULL THEN NULL ELSE (SELECT count(*)::text FROM mirror.products p
-    WHERE p.shop_id=j.shop_id AND p.generation_id=j.generation_id AND p.deleted_at IS NULL) END AS products_saved`;
+    WHERE p.shop_id=j.shop_id AND p.generation_id=j.generation_id AND p.deleted_at IS NULL) END AS products_saved,
+  (j.status='SUCCEEDED' AND g.status='PUBLISHED' AND EXISTS(SELECT 1 FROM mirror.publications pub
+    JOIN mirror.shops live ON live.id=pub.shop_id AND live.installation_version=j.installation_version AND live.uninstalled_at IS NULL
+    WHERE pub.shop_id=j.shop_id AND pub.generation_id=j.generation_id)
+    AND NOT EXISTS(SELECT 1 FROM mirror.catalog_import_jobs active WHERE active.shop_id=j.shop_id
+      AND (active.status IN ('QUEUED','RUNNING','RETRY') OR active.cancel_requested AND active.status NOT IN ('CANCELLED','SUCCEEDED')))
+    AND NOT EXISTS(SELECT 1 FROM mirror.catalog_import_jobs newer WHERE newer.shop_id=j.shop_id
+      AND newer.installation_version=j.installation_version AND (newer.created_at,newer.id)>(j.created_at,j.id))) AS editing_allowed,
+  COALESCE((SELECT jsonb_agg(preview.row ORDER BY preview.id) FROM (SELECT p.shopify_id AS id,
+    jsonb_build_object('id',p.shopify_id,'title',p.title,'status',p.status,'vendor',p.vendor,'productType',p.product_type) AS row
+    FROM mirror.products p WHERE p.shop_id=j.shop_id AND p.generation_id=j.generation_id AND p.deleted_at IS NULL
+    ORDER BY p.shopify_id LIMIT 50) preview),'[]'::jsonb) AS preview_products`;
+
+// Failed attempts are not restarted on every scheduler tick. They retain the
+// existing bounded worker retries/review flow, with another periodic attempt
+// no sooner than 72 hours after that attempt. Successful publication resets age.
+const periodicDue = `EXISTS(SELECT 1 FROM mirror.catalog_import_jobs prior WHERE prior.shop_id=s.id
+    AND prior.installation_version=s.installation_version)
+  AND NOT EXISTS(SELECT 1 FROM mirror.catalog_import_jobs recent
+    LEFT JOIN mirror.generations published ON published.shop_id=recent.shop_id AND published.id=recent.generation_id
+    WHERE recent.shop_id=s.id AND recent.installation_version=s.installation_version
+      AND GREATEST(recent.created_at,published.published_at)>clock_timestamp()-interval '72 hours')
+  AND NOT EXISTS(SELECT 1 FROM mirror.catalog_import_jobs active WHERE active.shop_id=s.id
+    AND (active.status IN ('QUEUED','RUNNING','RETRY') OR active.cancel_requested AND active.status NOT IN ('CANCELLED','SUCCEEDED')))
+  AND NOT EXISTS(SELECT 1 FROM mirror.generations pending WHERE pending.shop_id=s.id AND pending.status IN ('INGESTING','RECONCILING','VERIFIED'))
+  AND NOT EXISTS(SELECT 1 FROM mirror.catalog_refresh_requests pending WHERE pending.shop_id=s.id
+    AND pending.installation_version=s.installation_version AND (pending.requested_revision>pending.scheduled_revision OR pending.review_required))`;
 
 export function createCatalogImportService({ database, shopify, fetchImpl = fetch, logger = console,
   phaseRuntime,
   clientFactory = input => createShopifyCatalogClient({ database, shopify, ...input }) }) {
   const sync = createSyncRunService({ database });
   const reconciliation = createReconciliationService({ database });
-  let timer, running, stopping = false, initialScanCursor = "", refreshScanCursor = "";
+  let timer, running, stopping = false, initialScanCursor = "", refreshScanCursor = "", periodicScanCursor = "";
   const controllers = new Map();
 
   async function authenticate(session) {
@@ -138,6 +168,10 @@ export function createCatalogImportService({ database, shopify, fetchImpl = fetc
       if ((initial || refresh) && (await client.query(`SELECT 1 FROM mirror.generations WHERE shop_id=$1
         AND status IN ('INGESTING','RECONCILING','VERIFIED') LIMIT 1`, [stored.shop])).rowCount) return null;
       const current = (await client.query("SELECT generation_id FROM mirror.publications WHERE shop_id=$1", [stored.shop])).rows[0]?.generation_id ?? null;
+      if((await client.query('SELECT mirror.catalog_sync_is_blocked($1) AS blocked',[stored.shop])).rows[0]?.blocked) {
+        if(initial||refresh)return null; // Leave the durable signal pending; do not exhaust retries while edits drain.
+        throw new CatalogImportError(C.UNAVAILABLE);
+      }
       await authenticate(session);
       const job = phaseRuntime
         ? await phaseRuntime.enqueue({client,shopId:stored.shop,installationVersion:installed.installation_version,expectedGenerationId:current})
@@ -150,9 +184,47 @@ export function createCatalogImportService({ database, shopify, fetchImpl = fetc
     }, stored.shop);
   }
   const service = Object.freeze({
+    // Holds the publication barrier through the demo creation request. New
+    // sync admission takes the exclusive side; no transport is replayed here.
+    async withEditingLock(session, execute) {
+      if (typeof execute !== 'function') throw new TypeError('Trusted edit callback required');
+      const stored = await authenticate(session);
+      if(!hasCurrentProductWrite(stored))throw new CatalogImportError(C.FORBIDDEN);
+      const client = await database.connect();
+      let discard;
+      try {
+        await client.query('BEGIN ISOLATION LEVEL READ COMMITTED');
+        await client.query("SET LOCAL lock_timeout='2000ms'");
+        await client.query("SET LOCAL statement_timeout='5000ms'");
+        await lockPublication(client, stored.shop);
+        if(!hasCurrentProductWrite(await authenticate(session)))throw new CatalogImportError(C.FORBIDDEN);
+        await client.query('SELECT mirror.assert_catalog_edit_ready($1)', [stored.shop]);
+        const result = await execute();
+        await client.query('COMMIT');
+        return result;
+      } catch(error) {
+        try {await client.query('ROLLBACK');} catch(failure) {discard=failure;}
+        if(error.code==='55000') throw new CatalogImportError(C.UNAVAILABLE,{message:'Editing is locked until catalog sync completes'});
+        throw error;
+      } finally {client.release(discard);}
+    },
     enqueue: session => enqueue(session),
     onInstall: session => enqueue(session, {initial:true,activate:true}),
     ensureInitialSync: session => enqueue(session, {initial:true}),
+    async ensurePeriodicFullSyncs() {
+      const candidates=(await database.query(`SELECT s.id,s.installation_version FROM mirror.shops s
+        WHERE s.uninstalled_at IS NULL AND s.id>$1 AND ${periodicDue} ORDER BY s.id LIMIT 10`,[periodicScanCursor])).rows;
+      periodicScanCursor=candidates.at(-1)?.id??'';
+      for(const candidate of candidates) {
+        await transaction(database,async client=>{
+          // Recheck after the same exclusive barrier used by webhook ingestion,
+          // install/uninstall and refresh allocation. Concurrent scanners coalesce.
+          const due=(await client.query(`SELECT s.id FROM mirror.shops s WHERE s.id=$1 AND s.installation_version=$2
+            AND s.uninstalled_at IS NULL AND ${periodicDue} FOR UPDATE OF s`,[candidate.id,candidate.installation_version])).rowCount;
+          if(due)await requestCatalogRefresh(client,candidate.id);
+        },candidate.id);
+      }
+    },
     async ensurePendingCatalogRefreshes() {
       const exhausted=await database.query(`UPDATE mirror.catalog_refresh_requests SET review_required=true,last_error='REFRESH_RETRY_EXHAUSTED'
         WHERE shop_id IN(SELECT shop_id FROM mirror.catalog_refresh_requests WHERE requested_revision>scheduled_revision AND attempts>=8 AND NOT review_required
@@ -220,7 +292,8 @@ export function createCatalogImportService({ database, shopify, fetchImpl = fetc
     async status(session, id) {
       const stored = await authenticate(session);
       requireCatalogImportId(id);
-      const result=publicJob((await readProgress(`SELECT ${progressColumns} FROM mirror.catalog_import_jobs j ${progressJoins}
+      const result=publicJob((await readProgress(`SELECT ${progressColumns} FROM mirror.catalog_import_jobs j
+        JOIN mirror.shops s ON s.id=j.shop_id AND s.installation_version=j.installation_version AND s.uninstalled_at IS NULL ${progressJoins}
         WHERE j.shop_id=$1 AND j.id=$2`, [stored.shop,id], stored.shop)).rows[0]);
       await authenticate(session);return result;
     },
@@ -420,6 +493,7 @@ export function createCatalogImportService({ database, shopify, fetchImpl = fetc
       }
     },
     async verifyStorage() {
+      await database.query('SELECT bulk_start_input_hash,bulk_start_fence,bulk_start_operation_id FROM mirror.ingestion_runs LIMIT 0');
       await database.query("SELECT id,execution_mode FROM mirror.catalog_import_jobs LIMIT 0");
       await database.query("SELECT shop_id,requested_revision,scheduled_revision,attempts FROM mirror.catalog_refresh_requests LIMIT 0");
       await phaseRuntime?.verifyStorage();
@@ -430,7 +504,7 @@ export function createCatalogImportService({ database, shopify, fetchImpl = fetc
       phaseRuntime?.start();
       const tick = () => {
         if (running || stopping) return;
-        running = service.ensurePendingInitialSyncs().then(() => service.ensurePendingCatalogRefreshes()).then(() => service.processOne()).catch(error => logger.error?.({ code: error.code }, "Import worker failed"))
+        running = service.ensurePendingInitialSyncs().then(() => service.ensurePeriodicFullSyncs()).then(() => service.ensurePendingCatalogRefreshes()).then(() => service.processOne()).catch(error => logger.error?.({ code: error.code }, "Import worker failed"))
           .finally(() => { running = null; });
       };
       timer = setInterval(tick, 2000); timer.unref?.(); tick();
@@ -445,6 +519,7 @@ export function createCatalogImportService({ database, shopify, fetchImpl = fetc
     },
   });
   return Object.freeze({ ...service,
+    withEditingLock: withImportErrors(service.withEditingLock),
     enqueue: withImportErrors(service.enqueue),
     current: withImportErrors(service.current),
     status: withImportErrors(service.status),

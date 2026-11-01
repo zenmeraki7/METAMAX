@@ -6,28 +6,457 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  schemas  = ["public", "mirror"]
+  schemas  = ["edit_history", "export_engine", "mirror", "public"]
 }
 
-model shopify_sessions {
-  id               String  @id @db.VarChar(255)
-  shop             String  @db.VarChar(255)
-  state            String  @db.VarChar(255)
-  isOnline         Boolean
-  scope            String? @db.VarChar(1024)
-  expires          Int?
-  onlineAccessInfo String? @db.VarChar(255)
-  accessToken      String? @db.VarChar(255)
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model changes {
+  id                          String           @id @db.Uuid
+  shop_id                     String
+  installation_id             String
+  operation_id                String           @db.Uuid
+  execution_item_id           BigInt
+  mutation_id                 String
+  attempt_id                  String
+  attempt_number              Int
+  execution_fence_epoch       BigInt
+  execution_claim_id          String
+  resource_gid                String
+  resource_family_gid         String
+  field_id                    String
+  field_definition_revision   String
+  mutation_plan_fingerprint   String
+  intended_value_fingerprint  String
+  before_snapshot_fingerprint String
+  mutation_state              String           @default("PREPARED")
+  verification_state          String           @default("NOT_CHECKED")
+  last_evidence_kind          String?
+  last_evidence_fingerprint   String?
+  outcome_code                String?
+  prepared_at                 DateTime         @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+  dispatch_started_at         DateTime?        @db.Timestamptz(6)
+  acknowledged_at             DateTime?        @db.Timestamptz(6)
+  verified_at                 DateTime?        @db.Timestamptz(6)
+  updated_at                  DateTime         @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+  operations                  operations       @relation(fields: [shop_id, installation_id, operation_id], references: [shop_id, installation_id, id], onUpdate: NoAction, map: "eh_change_operation_fk")
+  recovery_tasks              recovery_tasks[]
+  snapshots                   snapshots[]
 
-  @@schema("public")
+  @@unique([shop_id, installation_id, operation_id, mutation_id, attempt_number, resource_gid, field_id], map: "eh_change_attempt_number_resource_field_unique")
+  @@unique([shop_id, installation_id, operation_id, mutation_id, attempt_id, resource_gid, field_id], map: "eh_change_attempt_resource_field_unique")
+  @@unique([shop_id, installation_id, operation_id, id], map: "eh_change_operation_key")
+  @@unique([shop_id, installation_id, id], map: "eh_change_tenant_key")
+  @@index([shop_id, installation_id, execution_item_id], map: "eh_change_execution_item_idx")
+  @@index([shop_id, installation_id, resource_family_gid, prepared_at(sort: Desc)], map: "eh_change_family_idx")
+  @@index([shop_id, installation_id, operation_id, prepared_at, id], map: "eh_change_operation_idx")
+  @@index([shop_id, installation_id, resource_gid, prepared_at(sort: Desc), id(sort: Desc)], map: "eh_change_resource_idx")
+  @@index([shop_id, installation_id, updated_at, id], map: "eh_change_unknown_idx", where: raw("(mutation_state = 'OUTCOME_UNKNOWN'::text)"))
+  @@index([shop_id, installation_id, operation_id, resource_gid, field_id, prepared_at(sort: Desc), attempt_number(sort: Desc), id(sort: Desc)], map: "eh_undo_source_read_idx")
+  @@index([shop_id, resource_family_gid], map: "eh_unresolved_family_idx", where: raw("(mutation_state = ANY (ARRAY['DISPATCHING'::text, 'OUTCOME_UNKNOWN'::text, 'ACKNOWLEDGED'::text]))"))
+  @@schema("edit_history")
 }
 
-model shopify_sessions_migrations {
-  migration_name String @id @db.VarChar(255)
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model mutation_requests {
+  id                            String     @id @db.Uuid
+  shop_id                       String
+  installation_id               String
+  operation_id                  String     @db.Uuid
+  mutation_id                   String
+  attempt_id                    String
+  attempt_number                Int
+  execution_item_id             BigInt
+  execution_fence_epoch         BigInt
+  execution_claim_id            String
+  mutation_plan_fingerprint     String
+  request_fingerprint           String
+  resource_field_set            Json
+  field_count                   Int
+  request_state                 String     @default("PREPARED")
+  dispatch_handoff_key          String
+  dispatch_evidence_fingerprint String?
+  outcome_evidence_fingerprint  String?
+  outcome_evidence_kind         String?
+  prepared_at                   DateTime   @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+  dispatch_authorized_at        DateTime?  @db.Timestamptz(6)
+  acknowledged_at               DateTime?  @db.Timestamptz(6)
+  verified_at                   DateTime?  @db.Timestamptz(6)
+  created_at                    DateTime   @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+  updated_at                    DateTime   @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+  dispatch_token_hash           String?
+  dispatch_consumed_at          DateTime?  @db.Timestamptz(6)
+  operations                    operations @relation(fields: [shop_id, installation_id, operation_id], references: [shop_id, installation_id, id], onUpdate: NoAction, map: "eh_request_operation_fk")
 
-  @@schema("public")
+  @@unique([shop_id, installation_id, operation_id, mutation_id, attempt_id], map: "eh_request_attempt_unique")
+  @@unique([shop_id, installation_id, dispatch_handoff_key], map: "eh_request_handoff_unique")
+  @@unique([shop_id, installation_id, operation_id, mutation_id, attempt_number], map: "eh_request_number_unique")
+  @@unique([shop_id, installation_id, operation_id, id], map: "eh_request_operation_key")
+  @@unique([shop_id, installation_id, id], map: "eh_request_tenant_key")
+  @@index([shop_id, installation_id, operation_id, created_at(sort: Desc), id], map: "eh_request_operation_idx")
+  @@index([updated_at, id], map: "eh_request_recovery_idx", where: raw("(request_state = ANY (ARRAY['DISPATCH_AUTHORIZED'::text, 'OUTCOME_UNKNOWN'::text, 'ACKNOWLEDGED'::text]))"))
+  @@index([shop_id, installation_id, operation_id], map: "eh_unresolved_execution_idx", where: raw("(request_state = ANY (ARRAY['DISPATCH_AUTHORIZED'::text, 'ACKNOWLEDGED'::text, 'OUTCOME_UNKNOWN'::text]))"))
+  @@index([shop_id, installation_id, execution_item_id, operation_id], map: "eh_verified_execution_item_idx", where: raw("(request_state = 'VERIFIED'::text)"))
+  @@schema("edit_history")
 }
 
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model operations {
+  id                            String              @id @db.Uuid
+  shop_id                       String
+  installation_id               String
+  execution_job_id              BigInt
+  edit_operation_id             BigInt?
+  execution_contract_id         String?
+  contract_version              Int                 @default(3)
+  fingerprint_scheme            String              @default("metamax-history-sha256-v3")
+  operation_kind                String
+  operation_state               String              @default("RECORDING")
+  execution_fingerprint         String
+  filter_fingerprint            String?
+  approved_contract_fingerprint String?
+  field_mapping_version         String?
+  actor_type                    String              @default("SYSTEM")
+  actor_reference               String?
+  changes_recorded              BigInt              @default(0)
+  changes_verified              BigInt              @default(0)
+  changes_failed                BigInt              @default(0)
+  changes_uncertain             BigInt              @default(0)
+  created_at                    DateTime            @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+  updated_at                    DateTime            @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+  completed_at                  DateTime?           @db.Timestamptz(6)
+  retained_until                DateTime?           @default(dbgenerated("(clock_timestamp() + '30 days'::interval)")) @db.Timestamptz(6)
+  legal_hold                    Boolean             @default(false)
+  purge_requested_at            DateTime?           @db.Timestamptz(6)
+  purge_attempts                Int                 @default(0)
+  purge_next_attempt_at         DateTime?           @db.Timestamptz(6)
+  purge_review_required         Boolean             @default(false)
+  encryption_review_required    Boolean             @default(false)
+  changes                       changes[]
+  mutation_requests             mutation_requests[]
+  recovery_tasks                recovery_tasks[]
+  undo_requests                 undo_requests[]
+
+  @@unique([shop_id, installation_id, execution_job_id], map: "eh_op_execution_unique")
+  @@unique([shop_id, installation_id, id], map: "eh_op_tenant_key")
+  @@index([shop_id, installation_id, execution_contract_id], map: "eh_op_contract_idx", where: raw("(execution_contract_id IS NOT NULL)"))
+  @@index([shop_id, installation_id, edit_operation_id], map: "eh_op_edit_idx", where: raw("(edit_operation_id IS NOT NULL)"))
+  @@index([shop_id, installation_id, created_at(sort: Desc), id(sort: Desc)], map: "eh_op_history_idx")
+  @@index([retained_until, id], map: "eh_op_retention_idx", where: raw("((retained_until IS NOT NULL) AND (legal_hold = false))"))
+  @@index([retained_until, created_at, id], map: "eh_retention_due", where: raw("(NOT legal_hold)"))
+  @@schema("edit_history")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model privacy_scopes {
+  shop_id             String
+  installation_id     String
+  uninstalled_at      DateTime  @db.Timestamptz(6)
+  redact_requested_at DateTime? @db.Timestamptz(6)
+  completed_at        DateTime? @db.Timestamptz(6)
+  review_required     Boolean   @default(false)
+
+  @@id([shop_id, installation_id])
+  @@schema("edit_history")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model purge_receipts {
+  scope_digest String
+  operation_id String   @db.Uuid
+  reason       String
+  purged_at    DateTime @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+  expires_at   DateTime @default(dbgenerated("(clock_timestamp() + '30 days'::interval)")) @db.Timestamptz(6)
+
+  @@id([scope_digest, operation_id])
+  @@schema("edit_history")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model recovery_tasks {
+  id                   String         @id @db.Uuid
+  shop_id              String
+  installation_id      String
+  operation_id         String         @db.Uuid
+  change_id            String?        @db.Uuid
+  undo_request_id      String?        @db.Uuid
+  task_kind            String
+  task_state           String         @default("PENDING")
+  dedupe_key           String
+  evidence_fingerprint String?
+  last_error_code      String?
+  attempt_count        Int            @default(0)
+  max_attempts         Int            @default(20)
+  available_at         DateTime       @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+  claimed_by           String?
+  claim_token          String?        @db.Uuid
+  fence_epoch          BigInt         @default(0)
+  claim_expires_at     DateTime?      @db.Timestamptz(6)
+  last_checked_at      DateTime?      @db.Timestamptz(6)
+  created_at           DateTime       @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+  updated_at           DateTime       @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+  completed_at         DateTime?      @db.Timestamptz(6)
+  changes              changes?       @relation(fields: [shop_id, installation_id, operation_id, change_id], references: [shop_id, installation_id, operation_id, id], onUpdate: NoAction, map: "eh_recovery_change_fk")
+  operations           operations     @relation(fields: [shop_id, installation_id, operation_id], references: [shop_id, installation_id, id], onUpdate: NoAction, map: "eh_recovery_operation_fk")
+  undo_requests        undo_requests? @relation(fields: [shop_id, installation_id, operation_id, undo_request_id], references: [shop_id, installation_id, original_operation_id, id], onUpdate: NoAction, map: "eh_recovery_undo_fk")
+
+  @@unique([shop_id, installation_id, task_kind, dedupe_key], map: "eh_recovery_dedupe")
+  @@unique([shop_id, installation_id, id], map: "eh_recovery_tenant_key")
+  @@index([shop_id, installation_id, change_id], map: "eh_recovery_change_idx", where: raw("(change_id IS NOT NULL)"))
+  @@index([claim_expires_at, id], map: "eh_recovery_expired_idx", where: raw("(task_state = 'RECONCILING'::text)"))
+  @@index([shop_id, installation_id, operation_id], map: "eh_recovery_operation_idx")
+  @@index([available_at, created_at, id], map: "eh_recovery_ready_idx", where: raw("(task_state = ANY (ARRAY['PENDING'::text, 'RETRY_WAIT'::text]))"))
+  @@index([shop_id, installation_id, undo_request_id], map: "eh_recovery_undo_idx", where: raw("(undo_request_id IS NOT NULL)"))
+  @@schema("edit_history")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model snapshots {
+  id                              String   @id @db.Uuid
+  shop_id                         String
+  installation_id                 String
+  operation_id                    String   @db.Uuid
+  change_id                       String   @db.Uuid
+  snapshot_version                Int      @default(3)
+  fingerprint_scheme              String   @default("metamax-history-sha256-v3")
+  snapshot_kind                   String
+  value_kind                      String
+  value_encoding                  String   @default("JSONB")
+  value_json                      Json?
+  encrypted_value                 Bytes?
+  encryption_key_reference        String?
+  snapshot_fingerprint            String
+  evidence_binding_fingerprint    String
+  observation_id                  String
+  observation_source              String
+  observed_at                     DateTime @db.Timestamptz(6)
+  source_revision                 String?
+  observation_receipt_id          String
+  observation_receipt_fingerprint String
+  field_definition_revision       String
+  binding_mode                    String
+  generation_id                   String?
+  coverage_revision               String?
+  mapping_version                 String?
+  execution_snapshot_id           String?
+  mirror_before_snapshot_id       BigInt?
+  created_at                      DateTime @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+  resource_gid                    String
+  field_id                        String
+  filter_fingerprint              String
+  execution_fingerprint           String
+  field_resolution_fingerprint    String
+  changes                         changes  @relation(fields: [shop_id, installation_id, operation_id, change_id], references: [shop_id, installation_id, operation_id, id], onUpdate: NoAction, map: "eh_snapshot_change_operation_fk")
+
+  @@unique([shop_id, installation_id, change_id, snapshot_kind, observation_id], map: "eh_snapshot_observation_unique")
+  @@unique([shop_id, installation_id, change_id], map: "eh_snapshot_one_before_idx", where: raw("(snapshot_kind = 'BEFORE'::text)"))
+  @@unique([shop_id, installation_id, id], map: "eh_snapshot_tenant_key")
+  @@index([shop_id, installation_id, change_id, observed_at, id], map: "eh_snapshot_change_idx")
+  @@index([operation_id, id], map: "eh_snapshot_legacy_encryption", where: raw("((value_kind = 'VALUE'::text) AND (value_encoding = 'JSONB'::text))"))
+  @@index([shop_id, installation_id, mirror_before_snapshot_id], map: "eh_snapshot_mirror_reference_idx", where: raw("(mirror_before_snapshot_id IS NOT NULL)"))
+  @@schema("edit_history")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model undo_requests {
+  id                       String           @id @db.Uuid
+  shop_id                  String
+  installation_id          String
+  original_operation_id    String           @db.Uuid
+  idempotency_key          String
+  request_fingerprint      String
+  undo_state               String           @default("REQUESTED")
+  conflict_policy          String           @default("ABORT_ON_CONFLICT")
+  preflight_fingerprint    String?
+  inverse_plan_fingerprint String?
+  approval_reference       String?
+  approved_at              DateTime?        @db.Timestamptz(6)
+  execution_job_id         BigInt?
+  execution_contract_id    String?
+  claimed_by               String?
+  claim_token              String?          @db.Uuid
+  fence_epoch              BigInt           @default(0)
+  claim_expires_at         DateTime?        @db.Timestamptz(6)
+  retry_count              Int              @default(0)
+  next_attempt_at          DateTime?        @db.Timestamptz(6)
+  failure_code             String?
+  created_at               DateTime         @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+  updated_at               DateTime         @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+  completed_at             DateTime?        @db.Timestamptz(6)
+  handoff_key              String
+  resource_gid             String?
+  recovery_tasks           recovery_tasks[]
+  operations               operations       @relation(fields: [shop_id, installation_id, original_operation_id], references: [shop_id, installation_id, id], onUpdate: NoAction, map: "eh_undo_operation_fk")
+
+  @@unique([shop_id, installation_id, execution_job_id], map: "eh_undo_execution_job_unique", where: raw("(execution_job_id IS NOT NULL)"))
+  @@unique([shop_id, installation_id, handoff_key], map: "eh_undo_handoff_unique")
+  @@unique([shop_id, installation_id, idempotency_key], map: "eh_undo_idempotency")
+  @@unique([shop_id, installation_id, original_operation_id, id], map: "eh_undo_operation_key")
+  @@unique([shop_id, installation_id, id], map: "eh_undo_tenant_key")
+  @@index([claim_expires_at, id], map: "eh_undo_expired_claim_idx", where: raw("(claim_token IS NOT NULL)"))
+  @@index([shop_id, installation_id, created_at(sort: Desc), id(sort: Desc)], map: "eh_undo_history_idx")
+  @@index([shop_id, installation_id, original_operation_id], map: "eh_undo_original_idx")
+  @@index([next_attempt_at, created_at, id], map: "eh_undo_ready_idx", where: raw("(undo_state = ANY (ARRAY['REQUESTED'::text, 'PREFLIGHTING'::text, 'SUBMITTING'::text, 'OUTCOME_UNKNOWN'::text]))"))
+  @@schema("edit_history")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model artifacts {
+  job_id             String   @id @db.Uuid
+  storage_key        String
+  storage_version    String
+  checksum           String
+  format             String
+  byte_count         BigInt
+  source_byte_count  BigInt
+  accounting_version String
+  row_count          BigInt
+  part_count         Int
+  storage_receipt    Json
+  expires_at         DateTime @db.Timestamptz(6)
+  jobs               jobs     @relation(fields: [job_id], references: [id], onUpdate: NoAction)
+
+  @@unique([storage_key, storage_version])
+  @@schema("export_engine")
+}
+
+model delivery_receipts {
+  event_id     String   @id @db.Uuid
+  delivery_key String   @unique @db.Uuid
+  job_id       String   @db.Uuid
+  observed_at  DateTime @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+  outbox       outbox   @relation(fields: [event_id], references: [id], onUpdate: NoAction)
+  jobs         jobs     @relation(fields: [job_id], references: [id], onUpdate: NoAction)
+
+  @@schema("export_engine")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model jobs {
+  id                                String              @id @db.Uuid
+  shop_id                           String
+  installation_id                   String
+  idempotency_key                   String
+  request_fingerprint               String
+  manifest_fingerprint              String
+  contract_version                  Int
+  manifest_version                  Int
+  manifest                          Json
+  generation_id                     String
+  coverage_revision                 String
+  mapping_version                   String
+  compiler_version                  String
+  generation_lease_id               String
+  generation_lease_expires_at       DateTime            @db.Timestamptz(6)
+  generation_lease_renewed_at       DateTime?           @db.Timestamptz(6)
+  generation_protection_released_at DateTime?           @db.Timestamptz(6)
+  generation_release_reason         String?
+  state                             String              @default("PENDING")
+  resume_state                      String              @default("RUNNING")
+  attempts                          Int                 @default(0)
+  recovery_attempts                 Int                 @default(0)
+  recovery_evidence                 Json?
+  fence_epoch                       BigInt              @default(0)
+  lease_owner                       String?
+  lease_token                       String?             @db.Uuid
+  lease_expires_at                  DateTime?           @db.Timestamptz(6)
+  heartbeat_at                      DateTime?           @db.Timestamptz(6)
+  next_attempt_at                   DateTime?           @db.Timestamptz(6)
+  cancel_requested                  Boolean             @default(false)
+  failure_code                      String?
+  checkpoint_version                BigInt              @default(0)
+  checkpoint                        Json                @default("{}")
+  rows_committed                    BigInt              @default(0)
+  bytes_committed                   BigInt              @default(0)
+  started_at                        DateTime?           @db.Timestamptz(6)
+  completed_at                      DateTime?           @db.Timestamptz(6)
+  expires_at                        DateTime?           @db.Timestamptz(6)
+  created_at                        DateTime            @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+  updated_at                        DateTime            @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+  retry_verified                    Boolean             @default(false)
+  artifacts                         artifacts?
+  delivery_receipts                 delivery_receipts[]
+  shops                             shops               @relation(fields: [shop_id], references: [id], onUpdate: Restrict)
+  outbox                            outbox[]
+  parts                             parts[]
+
+  @@unique([shop_id, installation_id, idempotency_key])
+  @@index([updated_at, id], map: "export_jobs_protection_cleanup", where: raw("((state = ANY (ARRAY['COMPLETED'::text, 'CANCELLED'::text, 'FAILED'::text, 'EXPIRED'::text])) AND (generation_protection_released_at IS NULL))"))
+  @@index([generation_lease_expires_at, id], map: "export_jobs_protection_renewal", where: raw("(generation_protection_released_at IS NULL)"))
+  @@index([created_at, id], map: "export_jobs_ready", where: raw("((state = 'QUEUED'::text) AND (NOT cancel_requested))"))
+  @@index([lease_expires_at, id], map: "export_jobs_recovery_due", where: raw("(state = ANY (ARRAY['RUNNING'::text, 'FINALIZING'::text, 'RECOVERING'::text]))"))
+  @@index([next_attempt_at, id], map: "export_jobs_retry_due", where: raw("(state = 'RETRY_WAIT'::text)"))
+  @@index([next_attempt_at, id], map: "export_jobs_unverified_retry_due", where: raw("((state = 'RETRY_WAIT'::text) AND (NOT retry_verified))"))
+  @@schema("export_engine")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model outbox {
+  id                      String             @id @db.Uuid
+  job_id                  String             @db.Uuid
+  event_type              String
+  delivery_key            String             @unique @db.Uuid
+  payload                 Json
+  state                   String             @default("PENDING")
+  attempts                Int                @default(0)
+  reconciliation_attempts Int                @default(0)
+  fence_epoch             BigInt             @default(0)
+  claim_owner             String?
+  claim_token             String?            @db.Uuid
+  claim_expires_at        DateTime?          @db.Timestamptz(6)
+  last_error_code         String?
+  delivery_evidence       Json?
+  last_checked_at         DateTime?          @db.Timestamptz(6)
+  delivered_at            DateTime?          @db.Timestamptz(6)
+  available_at            DateTime           @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+  created_at              DateTime           @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+  updated_at              DateTime           @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+  delivery_receipts       delivery_receipts?
+  jobs                    jobs               @relation(fields: [job_id], references: [id], onUpdate: NoAction)
+
+  @@index([available_at, id], map: "export_outbox_due", where: raw("(state = ANY (ARRAY['PENDING'::text, 'RETRY_ELIGIBLE'::text]))"))
+  @@index([claim_expires_at, id], map: "export_outbox_recovery", where: raw("(state = ANY (ARRAY['CLAIMED'::text, 'RECONCILING'::text]))"))
+  @@schema("export_engine")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model parts {
+  job_id           String @db.Uuid
+  part_number      Int
+  storage_key      String
+  storage_version  String
+  checksum         String
+  row_count        BigInt
+  byte_count       BigInt
+  checkpoint_after Json
+  committed_fence  BigInt
+  jobs             jobs   @relation(fields: [job_id], references: [id], onUpdate: NoAction)
+
+  @@id([job_id, part_number])
+  @@unique([storage_key, storage_version])
+  @@schema("export_engine")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model target_approvals {
+  shop_id           String
+  snapshot_id       String
+  generation_id     String
+  coverage_revision String
+  mapping_version   String
+  selection_hash    String
+  datasets          String[]
+
+  @@id([shop_id, snapshot_id])
+  @@schema("export_engine")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model audit_events {
   id           BigInt   @id @default(autoincrement())
   shop_id      String
@@ -44,6 +473,7 @@ model audit_events {
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model catalog_changes {
   shop_id                      String
   product_id                   String
@@ -69,6 +499,83 @@ model catalog_changes {
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model catalog_download_chunks {
+  shop_id           String
+  run_id            BigInt
+  byte_start        BigInt
+  byte_end          BigInt
+  line_start        BigInt
+  line_count        Int
+  lines             Json
+  checksum          String
+  source_checksum   String
+  catalog_downloads catalog_downloads @relation(fields: [shop_id, run_id], references: [shop_id, run_id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([shop_id, run_id, byte_start])
+  @@index([shop_id, run_id, line_start], map: "catalog_download_line_seek")
+  @@schema("mirror")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model catalog_downloads {
+  shop_id                 String
+  run_id                  BigInt
+  generation_id           String
+  operation_id            String
+  url_hash                String
+  etag                    String
+  total_bytes             BigInt
+  next_byte               BigInt                    @default(0)
+  line_count              BigInt                    @default(0)
+  pending                 Bytes                     @default("")
+  complete                Boolean                   @default(false)
+  catalog_download_chunks catalog_download_chunks[]
+  generations             generations               @relation(fields: [shop_id, generation_id], references: [shop_id, id], onDelete: Cascade, onUpdate: NoAction)
+  ingestion_runs          ingestion_runs            @relation(fields: [shop_id, run_id], references: [shop_id, id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([shop_id, run_id])
+  @@schema("mirror")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model catalog_import_executions {
+  id                              String                            @id
+  shop_id                         String
+  generation_id                   String
+  phase                           String                            @default("STARTING")
+  attempt                         Int                               @default(0)
+  fence                           BigInt                            @default(0)
+  lease_token                     String?
+  lease_until                     DateTime?                         @db.Timestamptz(3)
+  worker_id                       String?
+  next_eligible_at                DateTime?                         @db.Timestamptz(3)
+  completed_at                    DateTime?                         @db.Timestamptz(3)
+  review_required                 Boolean                           @default(false)
+  recovery_attempts               Int                               @default(0)
+  cancel_completed_at             DateTime?                         @db.Timestamptz(3)
+  outcome_uncertain               Boolean                           @default(false)
+  cancel_requested                Boolean                           @default(false)
+  last_error                      String?
+  delivery_revision               BigInt                            @default(0)
+  generations                     generations                       @relation(fields: [shop_id, generation_id], references: [shop_id, id], onUpdate: Restrict, map: "catalog_execution_generation")
+  catalog_import_jobs             catalog_import_jobs               @relation(fields: [shop_id, id, generation_id], references: [shop_id, id, generation_id], onUpdate: Restrict, map: "catalog_execution_job")
+  shops                           shops                             @relation(fields: [shop_id], references: [id])
+  ingestion_runs                  ingestion_runs[]
+  sync_dispatch_recovery_evidence sync_dispatch_recovery_evidence[]
+  sync_dispatches                 sync_dispatches[]
+  sync_external_operations        sync_external_operations[]
+
+  @@unique([shop_id, id, generation_id], map: "catalog_execution_identity")
+  @@index([next_eligible_at, id], map: "catalog_execution_due")
+  @@index([shop_id, lease_until], map: "catalog_execution_shop_lease")
+  @@schema("mirror")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model catalog_import_jobs {
   id                        String                     @id
   shop_id                   String                     @unique(map: "catalog_import_active_shop", where: raw("(status = ANY (ARRAY['QUEUED'::text, 'RUNNING'::text, 'RETRY'::text]))"))
@@ -91,9 +598,42 @@ model catalog_import_jobs {
 
   @@unique([shop_id, id, generation_id], map: "catalog_import_execution_identity")
   @@index([status, next_attempt_at, lease_until], map: "catalog_import_due")
+  @@index([shop_id, installation_version, created_at, id], map: "catalog_import_installation_history")
   @@schema("mirror")
 }
 
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model catalog_refresh_requests {
+  shop_id              String   @id
+  installation_version String
+  requested_revision   BigInt   @default(1)
+  scheduled_revision   BigInt   @default(0)
+  attempts             Int      @default(0)
+  next_attempt_at      DateTime @default(now()) @db.Timestamptz(3)
+  updated_at           DateTime @default(now()) @db.Timestamptz(3)
+  review_required      Boolean  @default(false)
+  last_error           String?
+  shops                shops    @relation(fields: [shop_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([next_attempt_at, shop_id], map: "catalog_refresh_requests_due", where: raw("(requested_revision > scheduled_revision)"))
+  @@schema("mirror")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model catalog_retention_audit {
+  shop_id       String
+  generation_id String
+  summary       Json
+  reclaimed_at  DateTime @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(3)
+  shops         shops    @relation(fields: [shop_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([shop_id, generation_id])
+  @@index([reclaimed_at], map: "catalog_retention_audit_age")
+  @@schema("mirror")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model categories {
   id            BigInt      @id @default(autoincrement())
   shop_id       String
@@ -107,6 +647,7 @@ model categories {
   @@schema("mirror")
 }
 
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model collections {
   id                  BigInt                @id @default(autoincrement())
   shop_id             String
@@ -124,6 +665,7 @@ model collections {
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model coverage {
   shop_id           String
   generation_id     String
@@ -132,18 +674,21 @@ model coverage {
   durable_rows      BigInt         @default(0)
   verified_at       DateTime?      @db.Timestamptz(3)
   verification_hash String?
+  history_lock      Int            @default(0) @map("_history_lock")
   generations       generations    @relation(fields: [shop_id, generation_id], references: [shop_id, id], onDelete: Cascade)
 
   @@id([shop_id, generation_id, name])
   @@schema("mirror")
 }
 
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model edit_operations {
   id                                                                            BigInt              @id @default(autoincrement())
   shop_id                                                                       String
   command_id                                                                    BigInt
   preview_id                                                                    String
   created_at                                                                    DateTime            @default(now()) @db.Timestamptz(3)
+  history_lock                                                                  Int                 @default(0) @map("_history_lock")
   job_commands                                                                  job_commands        @relation(fields: [shop_id, command_id], references: [shop_id, id])
   execution_contracts                                                           execution_contracts @relation(fields: [shop_id, preview_id], references: [shop_id, id])
   job_items                                                                     job_items[]
@@ -156,26 +701,126 @@ model edit_operations {
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model execution_contracts {
-  shop_id             String
-  id                  String
-  snapshot_id         String
-  operation           String
-  approval_revision   String
-  status              ApprovalStatus      @default(DRAFT)
-  contract            Json
-  contract_hash       String
-  approved_by         String?
-  approved_at         DateTime?           @db.Timestamptz(3)
-  expires_at          DateTime            @db.Timestamptz(3)
-  edit_operations     edit_operations[]
-  selection_snapshots selection_snapshots @relation(fields: [shop_id, snapshot_id], references: [shop_id, id])
-  job_commands        job_commands[]
+  shop_id              String
+  id                   String
+  snapshot_id          String
+  operation            String
+  approval_revision    String
+  status               ApprovalStatus         @default(DRAFT)
+  contract             Json
+  contract_hash        String
+  approved_by          String?
+  approved_at          DateTime?              @db.Timestamptz(3)
+  expires_at           DateTime               @db.Timestamptz(3)
+  hash_version         String                 @default("legacy-v1")
+  canonical_contract   String?
+  history_lock         Int                    @default(0) @map("_history_lock")
+  edit_operations      edit_operations[]
+  selection_snapshots  selection_snapshots    @relation(fields: [shop_id, snapshot_id], references: [shop_id, id])
+  import_previews      import_previews[]
+  job_commands         job_commands[]
+  schedule_occurrences schedule_occurrences[]
 
   @@id([shop_id, id])
   @@schema("mirror")
 }
 
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model export_dispatch_outbox {
+  id                   BigInt               @id @default(autoincrement())
+  shop_id              String
+  installation_id      String
+  export_job_id        String               @db.Uuid
+  dedupe_key           String
+  payload              Json
+  available_at         DateTime             @default(now()) @db.Timestamptz(3)
+  dispatched_at        DateTime?            @db.Timestamptz(3)
+  attempts             Int                  @default(0)
+  lease_token          String?              @db.Uuid
+  lease_expires_at     DateTime?            @db.Timestamptz(3)
+  fence_epoch          BigInt               @default(0)
+  created_at           DateTime             @default(now()) @db.Timestamptz(3)
+  export_manifest_jobs export_manifest_jobs @relation(fields: [shop_id, export_job_id], references: [shop_id, id], onDelete: Cascade, onUpdate: Restrict)
+
+  @@unique([shop_id, dedupe_key])
+  @@unique([shop_id, export_job_id])
+  @@index([available_at, id], map: "export_dispatch_outbox_due_idx", where: raw("(dispatched_at IS NULL)"))
+  @@schema("mirror")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model export_jobs {
+  id                   String              @id
+  shop_id              String
+  command_id           BigInt
+  installation_version String
+  generation_id        String
+  coverage_revision    String
+  mapping_version      String
+  snapshot_id          String
+  read_lease_id        String
+  format               String
+  status               String              @default("QUEUED")
+  attempts             Int                 @default(0)
+  fence                BigInt              @default(0)
+  lease_token          String?
+  lease_until          DateTime?           @db.Timestamptz(3)
+  next_attempt_at      DateTime            @default(now()) @db.Timestamptz(3)
+  artifact_key         String?
+  sha256               String?
+  byte_length          BigInt?
+  row_count            BigInt?
+  last_error           String?
+  created_at           DateTime            @default(now()) @db.Timestamptz(3)
+  updated_at           DateTime            @default(now()) @db.Timestamptz(3)
+  job_commands         job_commands        @relation(fields: [shop_id, command_id], references: [shop_id, id], onUpdate: NoAction)
+  generations          generations         @relation(fields: [shop_id, generation_id, coverage_revision, mapping_version], references: [shop_id, id, coverage_revision, mapping_version], onUpdate: Restrict)
+  selection_snapshots  selection_snapshots @relation(fields: [shop_id, snapshot_id], references: [shop_id, id], onUpdate: NoAction)
+
+  @@unique([shop_id, command_id, format])
+  @@unique([shop_id, id])
+  @@schema("mirror")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model export_manifest_jobs {
+  id                     String                  @id @db.Uuid
+  shop_id                String
+  installation_id        String
+  idempotency_key        String
+  request_fingerprint    String
+  manifest_fingerprint   String
+  contract_version       Int
+  manifest_version       Int
+  generation_id          String
+  coverage_revision      String
+  mapping_version        String
+  read_lease_id          String
+  manifest               Json
+  state                  String                  @default("QUEUED")
+  attempts               Int                     @default(0)
+  fence_epoch            BigInt                  @default(0)
+  lease_token            String?                 @db.Uuid
+  lease_expires_at       DateTime?               @db.Timestamptz(3)
+  created_at             DateTime                @default(now()) @db.Timestamptz(3)
+  updated_at             DateTime                @default(now()) @db.Timestamptz(3)
+  export_dispatch_outbox export_dispatch_outbox?
+  shops                  shops                   @relation(fields: [shop_id], references: [id], onUpdate: Restrict)
+  generations            generations             @relation(fields: [shop_id, generation_id, coverage_revision, mapping_version], references: [shop_id, id, coverage_revision, mapping_version], onUpdate: Restrict)
+  generation_read_leases generation_read_leases  @relation(fields: [shop_id, read_lease_id], references: [shop_id, id], onUpdate: Restrict)
+
+  @@unique([shop_id, installation_id, idempotency_key], map: "export_manifest_jobs_idempotency_unique")
+  @@unique([shop_id, id])
+  @@index([shop_id, state, created_at], map: "export_manifest_jobs_shop_state_idx")
+  @@schema("mirror")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model field_mappings {
   shop_id          String
   generation_id    String
@@ -192,6 +837,7 @@ model field_mappings {
   @@schema("mirror")
 }
 
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model generation_product_revisions {
   shop_id         String
   generation_id   String
@@ -206,17 +852,19 @@ model generation_product_revisions {
   @@schema("mirror")
 }
 
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model generation_read_leases {
-  shop_id           String
-  id                String
-  generation_id     String
-  coverage_revision String
-  mapping_version   String
-  operation         String
-  owner             String
-  expires_at        DateTime    @db.Timestamptz(3)
-  created_at        DateTime    @default(now()) @db.Timestamptz(3)
-  generations       generations @relation(fields: [shop_id, generation_id, coverage_revision, mapping_version], references: [shop_id, id, coverage_revision, mapping_version], onUpdate: Restrict)
+  shop_id              String
+  id                   String
+  generation_id        String
+  coverage_revision    String
+  mapping_version      String
+  operation            String
+  owner                String
+  expires_at           DateTime               @db.Timestamptz(3)
+  created_at           DateTime               @default(now()) @db.Timestamptz(3)
+  export_manifest_jobs export_manifest_jobs[]
+  generations          generations            @relation(fields: [shop_id, generation_id, coverage_revision, mapping_version], references: [shop_id, id, coverage_revision, mapping_version], onUpdate: Restrict)
 
   @@id([shop_id, id])
   @@index([shop_id, expires_at])
@@ -226,6 +874,7 @@ model generation_read_leases {
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model generations {
   shop_id                      String
   id                           String
@@ -240,10 +889,14 @@ model generations {
   retired_at                   DateTime?                      @db.Timestamptz(3)
   retain_until                 DateTime?                      @db.Timestamptz(3)
   required_datasets            String[]                       @default(["products", "variants"])
+  history_lock                 Int                            @default(0) @map("_history_lock")
+  catalog_downloads            catalog_downloads[]
   catalog_import_executions    catalog_import_executions[]
   categories                   categories[]
   collections                  collections[]
   coverage                     coverage[]
+  export_jobs                  export_jobs[]
+  export_manifest_jobs         export_manifest_jobs[]
   field_mappings               field_mappings[]
   generation_product_revisions generation_product_revisions[]
   generation_read_leases       generation_read_leases[]
@@ -262,6 +915,7 @@ model generations {
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model idempotency_records {
   shop_id      String
   operation    String
@@ -285,6 +939,30 @@ model idempotency_records {
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model import_previews {
+  id                  String               @id
+  shop_id             String
+  snapshot_id         String
+  status              String               @default("DRAFT")
+  payload             Json
+  canonical_preview   String
+  preview_hash        String
+  created_by          String
+  created_at          DateTime             @default(now()) @db.Timestamptz(3)
+  expires_at          DateTime             @db.Timestamptz(3)
+  contract_id         String?
+  approved_by         String?
+  approved_at         DateTime?            @db.Timestamptz(3)
+  execution_contracts execution_contracts? @relation(fields: [shop_id, contract_id], references: [shop_id, id], onUpdate: NoAction)
+  selection_snapshots selection_snapshots  @relation(fields: [shop_id, snapshot_id], references: [shop_id, id], onUpdate: NoAction)
+
+  @@unique([shop_id, id])
+  @@schema("mirror")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model ingestion_chunks {
   id             BigInt         @id @default(autoincrement())
   shop_id        String
@@ -300,6 +978,7 @@ model ingestion_chunks {
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model ingestion_runs {
   id                        BigInt                     @id @default(autoincrement())
   shop_id                   String
@@ -307,6 +986,9 @@ model ingestion_runs {
   dataset                   String
   status                    WorkStatus                 @default(PENDING)
   bulk_operation_id         String?
+  bulk_start_input_hash     String?
+  bulk_start_fence          BigInt?
+  bulk_start_operation_id   String?
   expected_lines            BigInt?
   processed_lines           BigInt                     @default(0)
   invalid_lines             BigInt                     @default(0)
@@ -319,16 +1001,19 @@ model ingestion_runs {
   created_at                DateTime                   @default(now()) @db.Timestamptz(3)
   execution_id              String?
   execution_fence           BigInt?
+  catalog_downloads         catalog_downloads?
   ingestion_chunks          ingestion_chunks[]
   catalog_import_executions catalog_import_executions? @relation(fields: [shop_id, execution_id, generation_id], references: [shop_id, id, generation_id], onUpdate: Restrict, map: "ingestion_execution_scope")
   generations               generations                @relation(fields: [shop_id, generation_id], references: [shop_id, id], onDelete: Cascade)
   mutation_journal          mutation_journal[]
+  sync_dispatches           sync_dispatches[]
 
   @@unique([shop_id, generation_id, dataset])
   @@unique([shop_id, id])
   @@schema("mirror")
 }
 
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model inventory_items {
   id                     BigInt             @id @default(autoincrement())
   shop_id                String
@@ -350,6 +1035,7 @@ model inventory_items {
   @@schema("mirror")
 }
 
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model inventory_levels {
   id                BigInt          @id @default(autoincrement())
   shop_id           String
@@ -370,6 +1056,7 @@ model inventory_levels {
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model job_artifacts {
   id           BigInt       @id @default(autoincrement())
   shop_id      String
@@ -388,56 +1075,68 @@ model job_artifacts {
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model job_commands {
-  id                  BigInt                @id @default(autoincrement())
-  shop_id             String
-  contract_id         String
-  idempotency_key     String
-  kind                String
-  status              WorkStatus            @default(PENDING)
-  attempts            Int                   @default(0)
-  max_attempts        Int                   @default(8)
-  available_at        DateTime              @default(now()) @db.Timestamptz(3)
-  cancel_requested_at DateTime?             @db.Timestamptz(3)
-  lease_token         String?
-  lease_until         DateTime?             @db.Timestamptz(3)
-  fence               BigInt                @default(0)
-  checkpoint          Json?
-  result              Json?
-  last_error          String?
-  created_at          DateTime              @default(now()) @db.Timestamptz(3)
-  updated_at          DateTime              @db.Timestamptz(3)
-  edit_operations     edit_operations?
-  idempotency_records idempotency_records[]
-  job_artifacts       job_artifacts[]
-  execution_contracts execution_contracts   @relation(fields: [shop_id, contract_id], references: [shop_id, id])
-  job_items           job_items[]
-  outbox_events       outbox_events[]
+  id                      BigInt                   @id @default(autoincrement())
+  shop_id                 String
+  contract_id             String
+  idempotency_key         String
+  kind                    String
+  status                  WorkStatus               @default(PENDING)
+  attempts                Int                      @default(0)
+  max_attempts            Int                      @default(8)
+  available_at            DateTime                 @default(now()) @db.Timestamptz(3)
+  cancel_requested_at     DateTime?                @db.Timestamptz(3)
+  lease_token             String?
+  lease_until             DateTime?                @db.Timestamptz(3)
+  fence                   BigInt                   @default(0)
+  checkpoint              Json?
+  result                  Json?
+  last_error              String?
+  created_at              DateTime                 @default(now()) @db.Timestamptz(3)
+  updated_at              DateTime                 @db.Timestamptz(3)
+  history_lock            Int                      @default(0) @map("_history_lock")
+  installation_version    String?
+  edit_operations         edit_operations?
+  export_jobs             export_jobs[]
+  idempotency_records     idempotency_records[]
+  job_artifacts           job_artifacts[]
+  execution_contracts     execution_contracts      @relation(fields: [shop_id, contract_id], references: [shop_id, id])
+  job_items               job_items[]
+  operation_finalizations operation_finalizations?
+  outbox_events           outbox_events[]
+  schedule_occurrences    schedule_occurrences[]
 
+  @@unique([shop_id, kind, contract_id], map: "job_commands_approved_operation_key")
   @@unique([shop_id, id])
   @@unique([shop_id, idempotency_key])
   @@index([available_at, id], map: "job_commands_due", where: raw("(status = ANY (ARRAY['PENDING'::\"WorkStatus\", 'RETRY'::\"WorkStatus\"]))"))
+  @@index([status, available_at, id], map: "job_commands_history_claim_idx", where: raw("((installation_version IS NOT NULL) AND (kind = ANY (ARRAY['bulk_edit'::text, 'undo'::text])))"))
   @@index([lease_until, id], map: "job_commands_recover", where: raw("(status = 'RUNNING'::\"WorkStatus\")"))
+  @@index([kind, status, id], map: "operation_finalization_command_scan")
   @@schema("mirror")
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model job_items {
-  id                                                                         BigInt             @id @default(autoincrement())
+  id                                                                         BigInt                    @id @default(autoincrement())
   shop_id                                                                    String
   command_id                                                                 BigInt
   resource_id                                                                String
-  status                                                                     WorkStatus         @default(PENDING)
+  status                                                                     WorkStatus                @default(PENDING)
   intended_values                                                            Json
   observed_revision                                                          BigInt?
-  attempts                                                                   Int                @default(0)
-  next_attempt_at                                                            DateTime?          @db.Timestamptz(3)
+  attempts                                                                   Int                       @default(0)
+  next_attempt_at                                                            DateTime?                 @db.Timestamptz(3)
   last_error                                                                 String?
   restore_snapshot_id                                                        BigInt?
-  edit_operations                                                            edit_operations    @relation(fields: [shop_id, command_id], references: [shop_id, command_id], map: "edit_item_operation_fkey")
-  job_commands                                                            job_commands       @relation(fields: [shop_id, command_id], references: [shop_id, id], onDelete: Cascade, map: "job_items_shop_id_command_id_fkey")
-  product_snapshots_job_items_shop_id_restore_snapshot_idToproduct_snapshots product_snapshots? @relation("job_items_shop_id_restore_snapshot_idToproduct_snapshots", fields: [shop_id, restore_snapshot_id], references: [shop_id, id])
-  product_snapshots_product_snapshots_shop_id_edit_item_idTojob_items        product_snapshots? @relation("product_snapshots_shop_id_edit_item_idTojob_items")
+  history_lock                                                               Int                       @default(0) @map("_history_lock")
+  edit_operations                                                            edit_operations           @relation(fields: [shop_id, command_id], references: [shop_id, command_id], map: "edit_item_operation_fkey")
+  job_commands                                                               job_commands              @relation(fields: [shop_id, command_id], references: [shop_id, id], onDelete: Cascade)
+  product_snapshots_job_items_shop_id_restore_snapshot_idToproduct_snapshots product_snapshots?        @relation("job_items_shop_id_restore_snapshot_idToproduct_snapshots", fields: [shop_id, restore_snapshot_id], references: [shop_id, id])
+  operation_finalizations                                                    operation_finalizations[]
+  product_snapshots_product_snapshots_shop_id_edit_item_idTojob_items        product_snapshots?        @relation("product_snapshots_shop_id_edit_item_idTojob_items")
 
   @@unique([shop_id, command_id, resource_id])
   @@unique([shop_id, id])
@@ -446,26 +1145,30 @@ model job_items {
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model job_schedules {
-  id          BigInt    @id @default(autoincrement())
-  shop_id     String
-  enabled     Boolean   @default(false)
-  timezone    String
-  recurrence  String
-  operation   String
-  template    Json
-  next_run_at DateTime  @db.Timestamptz(3)
-  last_run_at DateTime? @db.Timestamptz(3)
-  lease_token String?
-  lease_until DateTime? @db.Timestamptz(3)
-  fence       BigInt    @default(0)
-  shops       shops     @relation(fields: [shop_id], references: [id])
+  id                   BigInt                 @id @default(autoincrement())
+  shop_id              String
+  enabled              Boolean                @default(false)
+  timezone             String
+  recurrence           String
+  operation            String
+  template             Json
+  next_run_at          DateTime               @db.Timestamptz(3)
+  last_run_at          DateTime?              @db.Timestamptz(3)
+  lease_token          String?
+  lease_until          DateTime?              @db.Timestamptz(3)
+  fence                BigInt                 @default(0)
+  installation_version String?
+  shops                shops                  @relation(fields: [shop_id], references: [id])
+  schedule_occurrences schedule_occurrences[]
 
   @@unique([shop_id, id])
   @@index([next_run_at, id], map: "job_schedules_due", where: raw("enabled"))
   @@schema("mirror")
 }
 
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model locations {
   id               BigInt             @id @default(autoincrement())
   shop_id          String
@@ -482,6 +1185,7 @@ model locations {
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model metafield_definitions {
   id                      BigInt             @id @default(autoincrement())
   shop_id                 String
@@ -519,6 +1223,7 @@ model metafield_definitions {
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model metafield_values {
   id                    BigInt                @id @default(autoincrement())
   shop_id               String
@@ -551,6 +1256,7 @@ model metafield_values {
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model mutation_journal {
   id              BigInt          @id @default(autoincrement())
   shop_id         String
@@ -573,24 +1279,54 @@ model mutation_journal {
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model operation_finalizations {
+  shop_id              String
+  command_id           BigInt
+  installation_version String
+  execution_fence      BigInt
+  item_id              BigInt?
+  state                String       @default("PENDING")
+  history_pending      Boolean      @default(true)
+  undo_pending         Boolean      @default(false)
+  attempts             Int          @default(0)
+  fence                BigInt       @default(0)
+  lease_token          String?
+  lease_until          DateTime?    @db.Timestamptz(3)
+  next_attempt_at      DateTime     @default(now()) @db.Timestamptz(3)
+  last_error           String?
+  updated_at           DateTime     @default(now()) @db.Timestamptz(3)
+  job_commands         job_commands @relation(fields: [shop_id, command_id], references: [shop_id, id], onDelete: Cascade, onUpdate: NoAction)
+  job_items            job_items?   @relation(fields: [shop_id, item_id], references: [shop_id, id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([shop_id, command_id])
+  @@index([state, next_attempt_at, lease_until], map: "operation_finalization_due")
+  @@schema("mirror")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model outbox_events {
-  id            BigInt       @id @default(autoincrement())
-  shop_id       String
-  command_id    BigInt
-  dedupe_key    String
-  available_at  DateTime     @default(now()) @db.Timestamptz(3)
-  dispatched_at DateTime?    @db.Timestamptz(3)
-  attempts      Int          @default(0)
-  lease_token   String?
-  lease_until   DateTime?    @db.Timestamptz(3)
-  fence         BigInt       @default(0)
-  job_commands  job_commands @relation(fields: [shop_id, command_id], references: [shop_id, id], onDelete: Cascade)
+  id              BigInt       @id @default(autoincrement())
+  shop_id         String
+  command_id      BigInt
+  dedupe_key      String
+  available_at    DateTime     @default(now()) @db.Timestamptz(3)
+  dispatched_at   DateTime?    @db.Timestamptz(3)
+  attempts        Int          @default(0)
+  lease_token     String?
+  lease_until     DateTime?    @db.Timestamptz(3)
+  fence           BigInt       @default(0)
+  review_required Boolean      @default(false)
+  last_error      String?
+  job_commands    job_commands @relation(fields: [shop_id, command_id], references: [shop_id, id], onDelete: Cascade)
 
   @@unique([shop_id, dedupe_key])
   @@index([available_at, id], map: "outbox_events_due", where: raw("(dispatched_at IS NULL)"))
   @@schema("mirror")
 }
 
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model product_collections {
   shop_id       String
   generation_id String
@@ -604,6 +1340,7 @@ model product_collections {
   @@schema("mirror")
 }
 
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model product_options {
   id            BigInt   @id @default(autoincrement())
   shop_id       String
@@ -621,6 +1358,7 @@ model product_options {
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model product_snapshots {
   id                                                                 BigInt      @id @default(autoincrement())
   shop_id                                                            String
@@ -632,6 +1370,7 @@ model product_snapshots {
   after_revision                                                     BigInt?
   captured_at                                                        DateTime    @default(now()) @db.Timestamptz(3)
   confirmed_at                                                       DateTime?   @db.Timestamptz(3)
+  history_lock                                                       Int         @default(0) @map("_history_lock")
   job_items_job_items_shop_id_restore_snapshot_idToproduct_snapshots job_items[] @relation("job_items_shop_id_restore_snapshot_idToproduct_snapshots")
   job_items_product_snapshots_shop_id_edit_item_idTojob_items        job_items   @relation("product_snapshots_shop_id_edit_item_idTojob_items", fields: [shop_id, edit_item_id], references: [shop_id, id])
 
@@ -641,6 +1380,7 @@ model product_snapshots {
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model products {
   id                  BigInt                @id @default(autoincrement())
   shop_id             String
@@ -663,6 +1403,7 @@ model products {
   deleted_at          DateTime?             @db.Timestamptz(3)
   source_revision     BigInt                @default(0)
   attributes          Json?
+  history_lock        Int                   @default(0) @map("_history_lock")
   metafield_values    metafield_values[]
   product_collections product_collections[]
   product_options     product_options[]
@@ -676,17 +1417,20 @@ model products {
   @@schema("mirror")
 }
 
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model publications {
   shop_id           String      @id
   generation_id     String
   coverage_revision String
   mapping_version   String
   published_at      DateTime    @default(now()) @db.Timestamptz(3)
+  history_lock      Int         @default(0) @map("_history_lock")
   generations       generations @relation(fields: [shop_id, generation_id, coverage_revision, mapping_version], references: [shop_id, id, coverage_revision, mapping_version], onUpdate: Restrict)
 
   @@schema("mirror")
 }
 
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model saved_filters {
   shop_id     String
   id          String
@@ -701,6 +1445,42 @@ model saved_filters {
   @@schema("mirror")
 }
 
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model schedule_occurrences {
+  id                   String               @id
+  shop_id              String
+  schedule_id          BigInt
+  scheduled_for        DateTime             @db.Timestamptz(3)
+  template             Json
+  operation            String
+  status               String               @default("QUEUED")
+  phase                String               @default("SELECT")
+  snapshot_id          String?
+  contract_id          String?
+  command_id           BigInt?
+  attempts             Int                  @default(0)
+  fence                BigInt               @default(0)
+  lease_token          String?
+  lease_until          DateTime?            @db.Timestamptz(3)
+  next_attempt_at      DateTime             @default(now()) @db.Timestamptz(3)
+  last_error           String?
+  created_at           DateTime             @default(now()) @db.Timestamptz(3)
+  updated_at           DateTime             @default(now()) @db.Timestamptz(3)
+  installation_version String?
+  execution_result     Json?
+  job_commands         job_commands?        @relation(fields: [shop_id, command_id], references: [shop_id, id], onUpdate: NoAction)
+  execution_contracts  execution_contracts? @relation(fields: [shop_id, contract_id], references: [shop_id, id], onUpdate: NoAction)
+  job_schedules        job_schedules        @relation(fields: [shop_id, schedule_id], references: [shop_id, id], onUpdate: NoAction)
+  selection_snapshots  selection_snapshots? @relation(fields: [shop_id, snapshot_id], references: [shop_id, id], onUpdate: NoAction)
+
+  @@unique([shop_id, id])
+  @@unique([shop_id, schedule_id, scheduled_for])
+  @@index([status, next_attempt_at, lease_until], map: "schedule_occurrences_due")
+  @@schema("mirror")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model selection_items {
   id                  BigInt              @id @default(autoincrement())
   shop_id             String
@@ -715,6 +1495,7 @@ model selection_items {
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model selection_snapshots {
   shop_id              String
   id                   String
@@ -723,19 +1504,25 @@ model selection_snapshots {
   mapping_version      String
   operation            String
   operation_id         String
-  status               ApprovalStatus        @default(DRAFT)
+  status               ApprovalStatus         @default(DRAFT)
   filter_ast           Json
   filter_fingerprint   String
   registry_version     String
   definition_revisions Json
-  selected_count       BigInt                @default(0)
+  selected_count       BigInt                 @default(0)
   selection_hash       String?
-  frozen_at            DateTime?             @db.Timestamptz(3)
-  expires_at           DateTime              @db.Timestamptz(3)
-  created_at           DateTime              @default(now()) @db.Timestamptz(3)
+  frozen_at            DateTime?              @db.Timestamptz(3)
+  expires_at           DateTime               @db.Timestamptz(3)
+  created_at           DateTime               @default(now()) @db.Timestamptz(3)
+  history_lock         Int                    @default(0) @map("_history_lock")
+  installation_version String?
+  target_mode          String?
   execution_contracts  execution_contracts[]
+  export_jobs          export_jobs[]
+  import_previews      import_previews[]
+  schedule_occurrences schedule_occurrences[]
   selection_items      selection_items[]
-  generations          generations           @relation(fields: [shop_id, generation_id, coverage_revision, mapping_version], references: [shop_id, id, coverage_revision, mapping_version], onUpdate: Restrict)
+  generations          generations            @relation(fields: [shop_id, generation_id, coverage_revision, mapping_version], references: [shop_id, id, coverage_revision, mapping_version], onUpdate: Restrict)
 
   @@id([shop_id, id])
   @@unique([shop_id, id, generation_id])
@@ -744,28 +1531,38 @@ model selection_snapshots {
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model shops {
-  id                        String                      @id
-  installed_at              DateTime                    @default(now()) @db.Timestamptz(3)
-  uninstalled_at            DateTime?                   @db.Timestamptz(3)
-  installation_version      String
-  audit_events              audit_events[]
-  catalog_changes           catalog_changes[]
-  catalog_import_executions catalog_import_executions[]
-  catalog_import_jobs       catalog_import_jobs?
-  generations               generations[]
-  idempotency_records       idempotency_records[]
-  job_schedules             job_schedules[]
-  metafield_definitions     metafield_definitions[]
-  saved_filters             saved_filters[]
-  subscriptions             subscriptions?
-  webhook_receipts          webhook_receipts[]
+  id                              String                            @id
+  installed_at                    DateTime                          @default(now()) @db.Timestamptz(3)
+  uninstalled_at                  DateTime?                         @db.Timestamptz(3)
+  installation_version            String
+  history_lock                    Int                               @default(0) @map("_history_lock")
+  jobs                            jobs[]
+  audit_events                    audit_events[]
+  catalog_changes                 catalog_changes[]
+  catalog_import_executions       catalog_import_executions[]
+  catalog_import_jobs             catalog_import_jobs?
+  catalog_refresh_requests        catalog_refresh_requests?
+  catalog_retention_audit         catalog_retention_audit[]
+  export_manifest_jobs            export_manifest_jobs[]
+  generations                     generations[]
+  idempotency_records             idempotency_records[]
+  job_schedules                   job_schedules[]
+  metafield_definitions           metafield_definitions[]
+  saved_filters                   saved_filters[]
+  subscriptions                   subscriptions?
+  sync_dispatch_recovery_evidence sync_dispatch_recovery_evidence[]
+  sync_dispatch_schedule          sync_dispatch_schedule?
+  sync_dispatches                 sync_dispatches[]
+  webhook_receipts                webhook_receipts[]
 
   @@unique([id, installation_version])
   @@schema("mirror")
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model subscriptions {
   shop_id                  String    @id
   installation_version     String
@@ -784,6 +1581,118 @@ model subscriptions {
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model sync_dispatch_recovery_evidence {
+  id                        String                    @id
+  dispatch_id               String
+  shop_id                   String
+  run_id                    String
+  generation_id             String
+  delivery_revision         BigInt
+  kind                      String
+  delivery_key              String
+  recovery_token            String
+  recovery_fence            BigInt
+  decision                  String
+  queue_state               String
+  job_id                    String
+  observed_at               DateTime                  @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(3)
+  expires_at                DateTime                  @db.Timestamptz(3)
+  consumed_at               DateTime?                 @db.Timestamptz(3)
+  sync_dispatches           sync_dispatches           @relation(fields: [dispatch_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "sync_dispatch_recovery_evidence_dispatch_fk")
+  catalog_import_executions catalog_import_executions @relation(fields: [shop_id, run_id, generation_id], references: [shop_id, id, generation_id], onUpdate: Restrict, map: "sync_dispatch_recovery_evidence_execution_fk")
+  shops                     shops                     @relation(fields: [shop_id], references: [id], onUpdate: Restrict, map: "sync_dispatch_recovery_evidence_shop_fk")
+
+  @@unique([dispatch_id, recovery_fence], map: "sync_dispatch_recovery_evidence_fence_unique")
+  @@index([dispatch_id, recovery_fence, expires_at], map: "sync_dispatch_recovery_evidence_lookup_idx")
+  @@schema("mirror")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model sync_dispatch_schedule {
+  shop_id            String    @id
+  last_served        BigInt    @default(0)
+  last_dispatched_at DateTime? @db.Timestamptz(3)
+  next_eligible_at   DateTime  @default(now()) @db.Timestamptz(3)
+  shops              shops     @relation(fields: [shop_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "sync_dispatch_schedule_shop_fk")
+
+  @@index([next_eligible_at, last_dispatched_at, shop_id], map: "sync_dispatch_schedule_due_idx")
+  @@schema("mirror")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model sync_dispatches {
+  id                              String                            @id
+  shop_id                         String
+  run_id                          String
+  generation_id                   String
+  delivery_revision               BigInt
+  kind                            String
+  delivery_key                    String                            @unique
+  state                           String                            @default("PENDING")
+  dispatch_token                  String
+  reservation_fence               BigInt
+  reserved_until                  DateTime?                         @db.Timestamptz(3)
+  job_id                          String?
+  last_error_code                 String?
+  created_at                      DateTime                          @default(now()) @db.Timestamptz(3)
+  updated_at                      DateTime                          @default(now()) @db.Timestamptz(3)
+  next_attempt_at                 DateTime                          @default(now()) @db.Timestamptz(3)
+  attempt                         Int                               @default(0)
+  enqueued_at                     DateTime?                         @db.Timestamptz(3)
+  sync_run_id                     BigInt
+  recovery_token                  String?
+  recovery_until                  DateTime?                         @db.Timestamptz(3)
+  recovery_reason                 String?
+  consumed_at                     DateTime?                         @db.Timestamptz(3)
+  reviewed_at                     DateTime?                         @db.Timestamptz(3)
+  consumed_fence                  BigInt?
+  consumed_lease_token            String?
+  recovery_fence                  BigInt                            @default(0)
+  sync_dispatch_recovery_evidence sync_dispatch_recovery_evidence[]
+  catalog_import_executions       catalog_import_executions         @relation(fields: [shop_id, run_id, generation_id], references: [shop_id, id, generation_id], onUpdate: Restrict, map: "sync_dispatches_execution_fk")
+  shops                           shops                             @relation(fields: [shop_id], references: [id], onUpdate: Restrict, map: "sync_dispatches_shop_fk")
+  ingestion_runs                  ingestion_runs                    @relation(fields: [shop_id, sync_run_id], references: [shop_id, id], onUpdate: Restrict, map: "sync_dispatches_sync_run_fk")
+
+  @@unique([shop_id, delivery_key], map: "sync_dispatches_delivery_unique")
+  @@unique([shop_id, run_id, delivery_revision, kind], map: "sync_dispatches_logical_delivery_unique")
+  @@index([updated_at, id], map: "sync_dispatch_consumed_idx", where: raw("(state = 'CONSUMED'::text)"))
+  @@index([next_attempt_at, shop_id], map: "sync_dispatch_due_idx", where: raw("(state = ANY (ARRAY['PENDING'::text, 'RETRY_ELIGIBLE'::text]))"))
+  @@index([reserved_until, id], map: "sync_dispatch_expiry")
+  @@index([updated_at, id], map: "sync_dispatch_recovery_idx", where: raw("(state = ANY (ARRAY['UNKNOWN'::text, 'ENQUEUED'::text, 'RESERVED'::text, 'RECONCILING'::text]))"))
+  @@index([next_attempt_at, reserved_until], map: "sync_dispatches_retry_idx", where: raw("(state = ANY (ARRAY['PENDING'::text, 'RESERVED'::text, 'UNKNOWN'::text]))"))
+  @@index([shop_id, run_id, created_at], map: "sync_dispatches_run_idx")
+  @@schema("mirror")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model sync_external_operations {
+  id                        String                    @id
+  shop_id                   String
+  run_id                    String
+  generation_id             String
+  kind                      String
+  input_hash                String
+  state                     String
+  dispatch_fence            BigInt
+  operation_id              String?
+  remote_status             String?
+  object_count              BigInt?
+  last_error                String?
+  created_at                DateTime                  @default(now()) @db.Timestamptz(3)
+  updated_at                DateTime                  @default(now()) @db.Timestamptz(3)
+  catalog_import_executions catalog_import_executions @relation(fields: [shop_id, run_id, generation_id], references: [shop_id, id, generation_id], onUpdate: Restrict)
+
+  @@unique([run_id, kind])
+  @@schema("mirror")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model undo_operations {
   id                                                                            BigInt          @id @default(autoincrement())
   shop_id                                                                       String
@@ -799,6 +1708,7 @@ model undo_operations {
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model variants {
   id                  BigInt             @id @default(autoincrement())
   shop_id             String
@@ -832,6 +1742,7 @@ model variants {
   @@schema("mirror")
 }
 
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model webhook_receipts {
   id           BigInt    @id @default(autoincrement())
   shop_id      String
@@ -846,57 +1757,23 @@ model webhook_receipts {
   @@schema("mirror")
 }
 
-/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
-model catalog_import_executions {
-  id                       String                     @id
-  shop_id                  String
-  generation_id            String
-  phase                    String                     @default("STARTING")
-  attempt                  Int                        @default(0)
-  fence                    BigInt                     @default(0)
-  lease_token              String?
-  lease_until              DateTime?                  @db.Timestamptz(3)
-  worker_id                String?
-  next_eligible_at         DateTime?                  @db.Timestamptz(3)
-  completed_at             DateTime?                  @db.Timestamptz(3)
-  review_required          Boolean                    @default(false)
-  recovery_attempts        Int                        @default(0)
-  cancel_completed_at      DateTime?                  @db.Timestamptz(3)
-  outcome_uncertain        Boolean                    @default(false)
-  cancel_requested         Boolean                    @default(false)
-  last_error               String?
-  generations              generations                @relation(fields: [shop_id, generation_id], references: [shop_id, id], onUpdate: Restrict, map: "catalog_execution_generation")
-  catalog_import_jobs      catalog_import_jobs        @relation(fields: [shop_id, id, generation_id], references: [shop_id, id, generation_id], onUpdate: Restrict, map: "catalog_execution_job")
-  shops                    shops                      @relation(fields: [shop_id], references: [id])
-  ingestion_runs           ingestion_runs[]
-  sync_external_operations sync_external_operations[]
+model shopify_sessions {
+  id               String  @id @db.VarChar(255)
+  shop             String  @db.VarChar(255)
+  state            String  @db.VarChar(255)
+  isOnline         Boolean
+  scope            String? @db.VarChar(1024)
+  expires          Int?
+  onlineAccessInfo String? @db.VarChar(255)
+  accessToken      String? @db.VarChar(255)
 
-  @@unique([shop_id, id, generation_id], map: "catalog_execution_identity")
-  @@index([next_eligible_at, id], map: "catalog_execution_due")
-  @@index([shop_id, lease_until], map: "catalog_execution_shop_lease")
-  @@schema("mirror")
+  @@schema("public")
 }
 
-/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
-model sync_external_operations {
-  id                        String                    @id
-  shop_id                   String
-  run_id                    String
-  generation_id             String
-  kind                      String
-  input_hash                String
-  state                     String
-  dispatch_fence            BigInt
-  operation_id              String?
-  remote_status             String?
-  object_count              BigInt?
-  last_error                String?
-  created_at                DateTime                  @default(now()) @db.Timestamptz(3)
-  updated_at                DateTime                  @default(now()) @db.Timestamptz(3)
-  catalog_import_executions catalog_import_executions @relation(fields: [shop_id, run_id, generation_id], references: [shop_id, id, generation_id], onUpdate: Restrict)
+model shopify_sessions_migrations {
+  migration_name String @id @db.VarChar(255)
 
-  @@unique([run_id, kind])
-  @@schema("mirror")
+  @@schema("public")
 }
 
 enum ApprovalStatus {
@@ -940,6 +1817,7 @@ enum WorkStatus {
   RUNNING
   RETRY
   SUCCEEDED
+  PARTIAL
   FAILED
   CANCELLED
 

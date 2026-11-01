@@ -1,138 +1,152 @@
 // SQL migration owns lifecycle checks, partial indexes and immutable-record triggers.
 model ExportExecutionJob {
-  id String @id @db.Uuid
-  shopId String @map("shop_id") @db.Text
-  installationId String @map("installation_id") @db.Text
-  idempotencyKey String @map("idempotency_key") @db.Text
-  requestFingerprint String @map("request_fingerprint") @db.Text
-  manifestFingerprint String @map("manifest_fingerprint") @db.Text
-  contractVersion Int @map("contract_version")
-  manifestVersion Int @map("manifest_version")
-  manifest Json @db.JsonB
-  generationId String @map("generation_id") @db.Text
-  coverageRevision String @map("coverage_revision") @db.Text
-  mappingVersion String @map("mapping_version") @db.Text
-  compilerVersion String @map("compiler_version") @db.Text
-  generationLeaseId String @map("generation_lease_id") @db.Text
-  generationLeaseExpiresAt DateTime @map("generation_lease_expires_at") @db.Timestamptz
-  generationLeaseRenewedAt DateTime? @map("generation_lease_renewed_at") @db.Timestamptz
-  generationProtectionReleasedAt DateTime? @map("generation_protection_released_at") @db.Timestamptz
-  generationReleaseReason String? @map("generation_release_reason") @db.Text
-  state String @default("PENDING") @db.Text
-  resumeState String @default("RUNNING") @map("resume_state") @db.Text
-  attempts Int @default(0)
-  recoveryAttempts Int @default(0) @map("recovery_attempts")
-  recoveryEvidence Json? @map("recovery_evidence") @db.JsonB
-  retryVerified Boolean @default(false) @map("retry_verified")
-  fenceEpoch BigInt @default(0) @map("fence_epoch")
-  leaseOwner String? @map("lease_owner") @db.Text
-  leaseToken String? @map("lease_token") @db.Uuid
-  leaseExpiresAt DateTime? @map("lease_expires_at") @db.Timestamptz
-  heartbeatAt DateTime? @map("heartbeat_at") @db.Timestamptz
-  nextAttemptAt DateTime? @map("next_attempt_at") @db.Timestamptz
-  cancelRequested Boolean @default(false) @map("cancel_requested")
-  failureCode String? @map("failure_code") @db.Text
-  checkpointVersion BigInt @default(0) @map("checkpoint_version")
-  checkpoint Json @default("{}") @db.JsonB
-  rowsCommitted BigInt @default(0) @map("rows_committed")
-  bytesCommitted BigInt @default(0) @map("bytes_committed")
-  startedAt DateTime? @map("started_at") @db.Timestamptz
-  completedAt DateTime? @map("completed_at") @db.Timestamptz
-  expiresAt DateTime? @map("expires_at") @db.Timestamptz
-  createdAt DateTime @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz
-  updatedAt DateTime @default(dbgenerated("clock_timestamp()")) @map("updated_at") @db.Timestamptz
-  merchant Shop @relation(fields:[shopId],references:[id],onDelete:Restrict,onUpdate:Restrict)
-  parts ExportExecutionPart[]
-  artifact ExportExecutionArtifact?
-  outbox ExportExecutionOutbox[]
-  deliveryReceipts ExportDeliveryReceipt[]
-  @@unique([shopId,installationId,idempotencyKey])
+  id                             String                   @id @db.Uuid
+  shopId                         String                   @map("shop_id")
+  installationId                 String                   @map("installation_id")
+  idempotencyKey                 String                   @map("idempotency_key")
+  requestFingerprint             String                   @map("request_fingerprint")
+  manifestFingerprint            String                   @map("manifest_fingerprint")
+  contractVersion                Int                      @map("contract_version")
+  manifestVersion                Int                      @map("manifest_version")
+  manifest                       Json
+  generationId                   String                   @map("generation_id")
+  coverageRevision               String                   @map("coverage_revision")
+  mappingVersion                 String                   @map("mapping_version")
+  compilerVersion                String                   @map("compiler_version")
+  generationLeaseId              String                   @map("generation_lease_id")
+  generationLeaseExpiresAt       DateTime                 @map("generation_lease_expires_at") @db.Timestamptz(6)
+  generationLeaseRenewedAt       DateTime?                @map("generation_lease_renewed_at") @db.Timestamptz(6)
+  generationProtectionReleasedAt DateTime?                @map("generation_protection_released_at") @db.Timestamptz(6)
+  generationReleaseReason        String?                  @map("generation_release_reason")
+  state                          String                   @default("PENDING")
+  resumeState                    String                   @default("RUNNING") @map("resume_state")
+  attempts                       Int                      @default(0)
+  recoveryAttempts               Int                      @default(0) @map("recovery_attempts")
+  recoveryEvidence               Json?                    @map("recovery_evidence")
+  fenceEpoch                     BigInt                   @default(0) @map("fence_epoch")
+  leaseOwner                     String?                  @map("lease_owner")
+  leaseToken                     String?                  @map("lease_token") @db.Uuid
+  leaseExpiresAt                 DateTime?                @map("lease_expires_at") @db.Timestamptz(6)
+  heartbeatAt                    DateTime?                @map("heartbeat_at") @db.Timestamptz(6)
+  nextAttemptAt                  DateTime?                @map("next_attempt_at") @db.Timestamptz(6)
+  cancelRequested                Boolean                  @default(false) @map("cancel_requested")
+  failureCode                    String?                  @map("failure_code")
+  checkpointVersion              BigInt                   @default(0) @map("checkpoint_version")
+  checkpoint                     Json                     @default("{}")
+  rowsCommitted                  BigInt                   @default(0) @map("rows_committed")
+  bytesCommitted                 BigInt                   @default(0) @map("bytes_committed")
+  startedAt                      DateTime?                @map("started_at") @db.Timestamptz(6)
+  completedAt                    DateTime?                @map("completed_at") @db.Timestamptz(6)
+  expiresAt                      DateTime?                @map("expires_at") @db.Timestamptz(6)
+  createdAt                      DateTime                 @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(6)
+  updatedAt                      DateTime                 @default(dbgenerated("clock_timestamp()")) @map("updated_at") @db.Timestamptz(6)
+  retryVerified                  Boolean                  @default(false) @map("retry_verified")
+  artifact                       ExportExecutionArtifact?
+  deliveryReceipts               ExportDeliveryReceipt[]
+  merchant                       Shop                     @relation(fields: [shopId], references: [id], onUpdate: Restrict)
+  outbox                         ExportExecutionOutbox[]
+  parts                          ExportExecutionPart[]
+
+  @@unique([shopId, installationId, idempotencyKey])
+  @@index([updatedAt, id], map: "export_jobs_protection_cleanup", where: raw("((state = ANY (ARRAY['COMPLETED'::text, 'CANCELLED'::text, 'FAILED'::text, 'EXPIRED'::text])) AND (generation_protection_released_at IS NULL))"))
+  @@index([generationLeaseExpiresAt, id], map: "export_jobs_protection_renewal", where: raw("(generation_protection_released_at IS NULL)"))
+  @@index([createdAt, id], map: "export_jobs_ready", where: raw("((state = 'QUEUED'::text) AND (NOT cancel_requested))"))
+  @@index([leaseExpiresAt, id], map: "export_jobs_recovery_due", where: raw("(state = ANY (ARRAY['RUNNING'::text, 'FINALIZING'::text, 'RECOVERING'::text]))"))
+  @@index([nextAttemptAt, id], map: "export_jobs_retry_due", where: raw("(state = 'RETRY_WAIT'::text)"))
+  @@index([nextAttemptAt, id], map: "export_jobs_unverified_retry_due", where: raw("((state = 'RETRY_WAIT'::text) AND (NOT retry_verified))"))
   @@map("jobs")
   @@schema("export_engine")
 }
 
 model ExportExecutionPart {
-  jobId String @map("job_id") @db.Uuid
-  partNumber Int @map("part_number")
-  storageKey String @map("storage_key") @db.Text
-  storageVersion String @map("storage_version") @db.Text
-  checksum String @db.Text
-  rowCount BigInt @map("row_count")
-  byteCount BigInt @map("byte_count")
-  checkpointAfter Json @map("checkpoint_after") @db.JsonB
-  committedFence BigInt @map("committed_fence")
-  job ExportExecutionJob @relation(fields:[jobId],references:[id],onDelete:Restrict,onUpdate:NoAction)
-  @@id([jobId,partNumber])
-  @@unique([storageKey,storageVersion])
+  jobId           String             @map("job_id") @db.Uuid
+  partNumber      Int                @map("part_number")
+  storageKey      String             @map("storage_key")
+  storageVersion  String             @map("storage_version")
+  checksum        String
+  rowCount        BigInt             @map("row_count")
+  byteCount       BigInt             @map("byte_count")
+  checkpointAfter Json               @map("checkpoint_after")
+  committedFence  BigInt             @map("committed_fence")
+  job             ExportExecutionJob @relation(fields: [jobId], references: [id], onUpdate: NoAction)
+
+  @@id([jobId, partNumber])
+  @@unique([storageKey, storageVersion])
   @@map("parts")
   @@schema("export_engine")
 }
 
 model ExportExecutionArtifact {
-  jobId String @id @map("job_id") @db.Uuid
-  storageKey String @map("storage_key") @db.Text
-  storageVersion String @map("storage_version") @db.Text
-  checksum String @db.Text
-  format String @db.Text
-  byteCount BigInt @map("byte_count")
-  sourceByteCount BigInt @map("source_byte_count")
-  accountingVersion String @map("accounting_version") @db.Text
-  rowCount BigInt @map("row_count")
-  partCount Int @map("part_count")
-  storageReceipt Json @map("storage_receipt") @db.JsonB
-  expiresAt DateTime @map("expires_at") @db.Timestamptz
-  job ExportExecutionJob @relation(fields:[jobId],references:[id],onDelete:Restrict,onUpdate:NoAction)
-  @@unique([storageKey,storageVersion])
+  jobId             String             @id @map("job_id") @db.Uuid
+  storageKey        String             @map("storage_key")
+  storageVersion    String             @map("storage_version")
+  checksum          String
+  format            String
+  byteCount         BigInt             @map("byte_count")
+  sourceByteCount   BigInt             @map("source_byte_count")
+  accountingVersion String             @map("accounting_version")
+  rowCount          BigInt             @map("row_count")
+  partCount         Int                @map("part_count")
+  storageReceipt    Json               @map("storage_receipt")
+  expiresAt         DateTime           @map("expires_at") @db.Timestamptz(6)
+  job               ExportExecutionJob @relation(fields: [jobId], references: [id], onUpdate: NoAction)
+
+  @@unique([storageKey, storageVersion])
   @@map("artifacts")
   @@schema("export_engine")
 }
 
 model ExportExecutionOutbox {
-  receipt ExportDeliveryReceipt?
-  id String @id @db.Uuid
-  jobId String @map("job_id") @db.Uuid
-  eventType String @map("event_type") @db.Text
-  deliveryKey String @unique @map("delivery_key") @db.Uuid
-  payload Json @db.JsonB
-  state String @default("PENDING") @db.Text
-  attempts Int @default(0)
-  reconciliationAttempts Int @default(0) @map("reconciliation_attempts")
-  fenceEpoch BigInt @default(0) @map("fence_epoch")
-  claimOwner String? @map("claim_owner") @db.Text
-  claimToken String? @map("claim_token") @db.Uuid
-  claimExpiresAt DateTime? @map("claim_expires_at") @db.Timestamptz
-  lastErrorCode String? @map("last_error_code") @db.Text
-  deliveryEvidence Json? @map("delivery_evidence") @db.JsonB
-  lastCheckedAt DateTime? @map("last_checked_at") @db.Timestamptz
-  deliveredAt DateTime? @map("delivered_at") @db.Timestamptz
-  availableAt DateTime @default(dbgenerated("clock_timestamp()")) @map("available_at") @db.Timestamptz
-  createdAt DateTime @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz
-  updatedAt DateTime @default(dbgenerated("clock_timestamp()")) @map("updated_at") @db.Timestamptz
-  job ExportExecutionJob @relation(fields:[jobId],references:[id],onDelete:Restrict,onUpdate:NoAction)
+  id                     String                 @id @db.Uuid
+  jobId                  String                 @map("job_id") @db.Uuid
+  eventType              String                 @map("event_type")
+  deliveryKey            String                 @unique @map("delivery_key") @db.Uuid
+  payload                Json
+  state                  String                 @default("PENDING")
+  attempts               Int                    @default(0)
+  reconciliationAttempts Int                    @default(0) @map("reconciliation_attempts")
+  fenceEpoch             BigInt                 @default(0) @map("fence_epoch")
+  claimOwner             String?                @map("claim_owner")
+  claimToken             String?                @map("claim_token") @db.Uuid
+  claimExpiresAt         DateTime?              @map("claim_expires_at") @db.Timestamptz(6)
+  lastErrorCode          String?                @map("last_error_code")
+  deliveryEvidence       Json?                  @map("delivery_evidence")
+  lastCheckedAt          DateTime?              @map("last_checked_at") @db.Timestamptz(6)
+  deliveredAt            DateTime?              @map("delivered_at") @db.Timestamptz(6)
+  availableAt            DateTime               @default(dbgenerated("clock_timestamp()")) @map("available_at") @db.Timestamptz(6)
+  createdAt              DateTime               @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(6)
+  updatedAt              DateTime               @default(dbgenerated("clock_timestamp()")) @map("updated_at") @db.Timestamptz(6)
+  receipt                ExportDeliveryReceipt?
+  job                    ExportExecutionJob     @relation(fields: [jobId], references: [id], onUpdate: NoAction)
+
+  @@index([availableAt, id], map: "export_outbox_due", where: raw("(state = ANY (ARRAY['PENDING'::text, 'RETRY_ELIGIBLE'::text]))"))
+  @@index([claimExpiresAt, id], map: "export_outbox_recovery", where: raw("(state = ANY (ARRAY['CLAIMED'::text, 'RECONCILING'::text]))"))
   @@map("outbox")
   @@schema("export_engine")
 }
 
 model ExportDeliveryReceipt {
-  eventId String @id @map("event_id") @db.Uuid
-  deliveryKey String @unique @map("delivery_key") @db.Uuid
-  jobId String @map("job_id") @db.Uuid
-  observedAt DateTime @default(dbgenerated("clock_timestamp()")) @map("observed_at") @db.Timestamptz
-  event ExportExecutionOutbox @relation(fields:[eventId],references:[id],onDelete:Restrict,onUpdate:NoAction)
-  job ExportExecutionJob @relation(fields:[jobId],references:[id],onDelete:Restrict,onUpdate:NoAction)
+  eventId     String                @id @map("event_id") @db.Uuid
+  deliveryKey String                @unique @map("delivery_key") @db.Uuid
+  jobId       String                @map("job_id") @db.Uuid
+  observedAt  DateTime              @default(dbgenerated("clock_timestamp()")) @map("observed_at") @db.Timestamptz(6)
+  event       ExportExecutionOutbox @relation(fields: [eventId], references: [id], onUpdate: NoAction)
+  job         ExportExecutionJob    @relation(fields: [jobId], references: [id], onUpdate: NoAction)
+
   @@map("delivery_receipts")
   @@schema("export_engine")
 }
 
 model ExportTargetApproval {
-  shopId String @map("shop_id") @db.Text
-  snapshotId String @map("snapshot_id") @db.Text
-  generationId String @map("generation_id") @db.Text
-  coverageRevision String @map("coverage_revision") @db.Text
-  mappingVersion String @map("mapping_version") @db.Text
-  selectionHash String @map("selection_hash") @db.Text
-  datasets String[]
-  @@id([shopId,snapshotId])
+  shopId           String   @map("shop_id")
+  snapshotId       String   @map("snapshot_id")
+  generationId     String   @map("generation_id")
+  coverageRevision String   @map("coverage_revision")
+  mappingVersion   String   @map("mapping_version")
+  selectionHash    String   @map("selection_hash")
+  datasets         String[]
+
+  @@id([shopId, snapshotId])
   @@map("target_approvals")
   @@schema("export_engine")
 }

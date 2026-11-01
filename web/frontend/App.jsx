@@ -2,6 +2,7 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { lazy, Suspense } from "react";
 import AppNavigation from "./components/layout/AppNavigation.jsx";
 import SyncNotification from "./components/layout/SyncNotification.jsx";
+import CatalogEditBoundary from './components/layout/CatalogEditBoundary.jsx';
 import {SyncProgressProvider} from "./hooks/SyncProgressContext.js";
 import PageErrorBoundary from "./components/layout/PageErrorBoundary.jsx";
 const HomePage = lazy(() => import("./pages/HomePage.jsx"));
@@ -28,6 +29,7 @@ const demoPages = [
   [routes.integrations, "Integrations"],
   [routes.codeSnippets, "Code snippets"],
 ];
+const editingRoutes=new Set([routes.bulkEdit,routes.import,routes.recurringEdits,routes.productRules,routes.metafields,routes.markets]);
 
 export default function App() {
   return (
@@ -67,7 +69,7 @@ export default function App() {
                   <Route
                     key={path}
                     path={path}
-                    element={<DemoPage title={title} />}
+                    element={editingRoutes.has(path) ? <CatalogEditBoundary><DemoPage title={title} /></CatalogEditBoundary> : <DemoPage title={title} />}
                   />
                 ))}
 

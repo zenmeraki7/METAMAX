@@ -15,6 +15,7 @@ import {createHistoryRepository} from '../history-repository.server.js';
 import {createBulkExecutionRuntime} from '../../services/bulk-execution-runtime.server.js';
 import {verifyJobCommandInTransaction,renewJobCommandInTransaction} from '../../security/tenant-db-adapters.server.js';
 
+const base=f=>({authContext:f.input.authContext,operationId:f.input.operationId,mutationId:f.input.mutationId,attemptId:f.plan.attemptId});
 export async function testWorkerExecution(t,fixture,pool){
  await t.test('verified no-write requires the exact unconsumed handoff and revokes later consumption',async()=>{
   const f=await fixture();await f.repository.prepareRequest(f.input);
@@ -203,7 +204,7 @@ export async function testWorkerExecution(t,fixture,pool){
   assert.equal((await x.f.q('SELECT count(*) FROM mirror.product_snapshots WHERE shop_id=$1 AND confirmed_at IS NOT NULL',[x.f.shopId])).rows[0].count,'0');
  });
  for(const mode of ['consume-lost','revoke'])await t.test(`worker ${mode} cannot contact Shopify after losing dispatch eligibility`,async()=>{
-  const x=await setup(mode);assert.equal((await x.worker.processOne({workerId:'worker'})).kind,'OUTCOME_UNKNOWN');assert.equal(x.sends(),0);
+  const x=await setup(mode);assert.equal((await x.worker.processOne({workerId:'worker'})).kind,mode==='revoke'?'STALE_CLAIM':'OUTCOME_UNKNOWN');assert.equal(x.sends(),0);
  });
  await t.test('database lease expiry after remote acceptance prevents old finalization and replacement sends',async()=>{
   const x=await setup('expire-mid-send');

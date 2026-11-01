@@ -25,6 +25,7 @@ test("initiateBulkCatalogExport checks running bulk operations and binds to Sync
   };
 
   let bound = false;
+  let responseId;
   const mockSyncRunService = {
     async getSyncRun() {
       return {
@@ -34,13 +35,15 @@ test("initiateBulkCatalogExport checks running bulk operations and binds to Sync
         bulkOperationId: null,
       };
     },
-    async bindBulkOperationId({ shopId: sid, runId, fence, bulkOperationId }) {
-      bound = true;
+    async recordBulkStartResponse({ shopId: sid, runId, fence, bulkOperationId }) {
+      responseId = bulkOperationId;
       assert.equal(sid, shopId);
       assert.equal(runId, 101n);
       assert.equal(fence, 1n);
       assert.equal(bulkOperationId, "gid://shopify/BulkOperation/888");
     },
+    async prepareBulkStart({fence}) { if(responseId){bound=true;return {operationId:responseId};} return {dispatchFence:String(fence)}; },
+    async rejectBulkStart() {},
     async failIngestionRun() {},
   };
 

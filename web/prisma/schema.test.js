@@ -1,3 +1,4 @@
+import {recordCompletedCatalogImport} from '../security/test-support/catalog-ready.js';
 import {testAuditSixTen} from '../mirror/integration/audit-six-ten.js';
 import {testTenantDatabase} from '../security/tenant-db.integration.js';
 import { test } from "node:test";
@@ -277,12 +278,13 @@ test("METAMAX schema enforces tenancy, ingestion, publication and approval bound
     await query(`UPDATE mirror.selection_snapshots SET selected_count=1,selection_hash='hash',frozen_at=now(),status='APPROVED' WHERE id='s1'`);
     await assert.rejects(() => query(`DELETE FROM mirror.selection_items WHERE snapshot_id='s1'`), { code: "23514" });
     await assert.rejects(() => query(`UPDATE mirror.selection_snapshots SET filter_ast='{"changed":true}' WHERE id='s1'`), { code: "23514" });
+    await recordCompletedCatalogImport(pool,'a.myshopify.com');
     await query(`INSERT INTO mirror.execution_contracts(shop_id,id,snapshot_id,operation,approval_revision,contract,contract_hash,expires_at)
       VALUES ('a.myshopify.com','e1','s1','bulk_edit','approval1','{}','hash',now()+interval '30 minutes')`);
     await query(`UPDATE mirror.execution_contracts SET status='APPROVED',approved_by='actor',approved_at=now() WHERE id='e1'`);
     await assert.rejects(() => query(`UPDATE mirror.execution_contracts SET contract='{"changed":true}' WHERE id='e1'`), { code: "23514" });
     await assert.rejects(() => query(`INSERT INTO mirror.job_commands(shop_id,contract_id,idempotency_key,kind,updated_at)
-      VALUES ('b.myshopify.com','e1','once','bulk_edit',now())`), { code: "23503" });
+      VALUES ('b.myshopify.com','e1','once','bulk_edit',now())`), { code: "55000" });
     await query(`INSERT INTO mirror.job_commands(shop_id,contract_id,idempotency_key,kind,updated_at)
       VALUES ('a.myshopify.com','e1','once','bulk_edit',now())`);
     await assert.rejects(() => query(`INSERT INTO mirror.job_commands(shop_id,contract_id,idempotency_key,kind,updated_at)

@@ -2,19 +2,19 @@
 
 model InventoryItem {
   id                   BigInt            @id @default(autoincrement())
-  shopId               String            @map("shop_id") @db.Text
-  generationId         String            @map("generation_id") @db.Text
-  shopifyId            String            @map("shopify_id") @db.Text
-  sku                  String?           @db.Text
+  shopId               String            @map("shop_id")
+  generationId         String            @map("generation_id")
+  shopifyId            String            @map("shopify_id")
+  sku                  String?
   tracked              Boolean
   requiresShipping     Boolean           @map("requires_shipping")
   unitCost             Decimal?          @map("unit_cost") @db.Decimal
-  currencyCode         String?           @map("currency_code") @db.Text
-  countryCodeOfOrigin  String?           @map("country_code_of_origin") @db.Text
-  harmonizedSystemCode String?           @map("harmonized_system_code") @db.Text
+  currencyCode         String?           @map("currency_code")
+  countryCodeOfOrigin  String?           @map("country_code_of_origin")
+  harmonizedSystemCode String?           @map("harmonized_system_code")
   generation           MirrorGeneration  @relation(fields: [shopId, generationId], references: [shopId, id], onDelete: Cascade)
-  variants             SnapshotVariant[]
   levels               InventoryLevel[]
+  variants             SnapshotVariant[]
 
   @@unique([shopId, generationId, shopifyId])
   @@unique([shopId, generationId, id])
@@ -24,13 +24,13 @@ model InventoryItem {
 
 model Location {
   id           BigInt           @id @default(autoincrement())
-  shopId       String           @map("shop_id") @db.Text
-  generationId String           @map("generation_id") @db.Text
-  shopifyId    String           @map("shopify_id") @db.Text
-  name         String           @db.Text
+  shopId       String           @map("shop_id")
+  generationId String           @map("generation_id")
+  shopifyId    String           @map("shopify_id")
+  name         String
   active       Boolean
-  generation   MirrorGeneration @relation(fields: [shopId, generationId], references: [shopId, id], onDelete: Cascade)
   levels       InventoryLevel[]
+  generation   MirrorGeneration @relation(fields: [shopId, generationId], references: [shopId, id], onDelete: Cascade)
 
   @@unique([shopId, generationId, shopifyId])
   @@unique([shopId, generationId, id])
@@ -40,9 +40,9 @@ model Location {
 
 model InventoryLevel {
   id              BigInt        @id @default(autoincrement())
-  shopId          String        @map("shop_id") @db.Text
-  generationId    String        @map("generation_id") @db.Text
-  shopifyId       String        @map("shopify_id") @db.Text
+  shopId          String        @map("shop_id")
+  generationId    String        @map("generation_id")
+  shopifyId       String        @map("shopify_id")
   inventoryItemId BigInt        @map("inventory_item_id")
   locationId      BigInt        @map("location_id")
   available       BigInt
@@ -50,7 +50,7 @@ model InventoryLevel {
   committed       BigInt
   incoming        BigInt
   inventoryItem   InventoryItem @relation(fields: [shopId, generationId, inventoryItemId], references: [shopId, generationId, id], onDelete: Cascade)
-  location        Location      @relation(fields: [shopId, generationId, locationId], references: [shopId, generationId, id], onDelete: Restrict)
+  location        Location      @relation(fields: [shopId, generationId, locationId], references: [shopId, generationId, id])
 
   @@unique([shopId, generationId, shopifyId])
   @@unique([shopId, generationId, inventoryItemId, locationId])

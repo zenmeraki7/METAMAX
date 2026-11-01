@@ -2,6 +2,7 @@
  * Browser ASTs are revalidated through the real Field/Filter Engines. They are
  * never executed as raw SQL or used as identifiers by this projection reader.
  */
+import {FIELD_ERROR_CODES as F} from '../fields/types.js';
 import {randomUUID} from "node:crypto";
 import {createSelectionService} from "../services/selection.server.js";
 import {assertVerifiedMirrorSqlSchema,assertPhysicalColumn} from "../services/mirror-schema.server.js";
@@ -59,15 +60,16 @@ export function createExportSource({database,runtime,publicationService,sessionS
   }
   const selection=createSelectionService({database,catalogQueryService:runtime.catalogQuery,resolveShop:runtime.authentication.resolveShop});
   async function resolveShop(authContext) {
-    const shopId=await runtime.authentication.resolveShop(authContext);
-    const tenant=assertInstallationTenant(await runtime.authentication.resolveTenant(authContext));
+    let shopId,tenant;
+    try{shopId=await runtime.authentication.resolveShop(authContext);tenant=assertInstallationTenant(await runtime.authentication.resolveTenant(authContext));}
+    catch(error){if(error.code===F.PERMISSION_DENIED)fail('Current export installation authentication required');throw error;}
     if(tenant.shopId!==shopId)fail('Export installation authority differs');
     return {id:shopId,installationId:tenant.installationId};
   }
   async function offline(job) {
     const session=(await sessionStorage.findSessionsByShop(job.shop_id)).find(s=>s.isOnline===false&&s.shop===job.shop_id&&isValidShopifySession(s));
     if(!session)fail("Current offline export session required");
-    const req={};runtime.authentication.capture(req,{locals:{shopify:{session}}},()=>{});
+    const req={};await runtime.authentication.capture(req,{locals:{shopify:{session}}},()=>{});
     const context=await runtime.authentication.authenticate(req);if(!context)fail("Export worker authentication unavailable");return context;
   }
   const api=Object.freeze({

@@ -27,6 +27,8 @@ export function createSchedulesService({database,workerDatabase,selectionService
     try {
       await client.query("BEGIN ISOLATION LEVEL READ COMMITTED");await client.query("SET LOCAL lock_timeout = '2000ms'");await client.query("SET LOCAL statement_timeout = '30000ms'");
       if(shopId){
+        // lockPublication initializes transaction-local app.shop_id before any
+        // tenant-protected read, as well as holding the publication barrier.
         await lockPublication(client,shopId);
         const current=(await client.query('SELECT installation_version FROM mirror.shops WHERE id=$1 AND uninstalled_at IS NULL FOR SHARE',[shopId])).rows[0];
         if(!current||installationVersion!==undefined&&current.installation_version!==installationVersion)fail(C.PERMISSION_DENIED,'Scheduled installation changed');
@@ -91,6 +93,9 @@ export function createSchedulesService({database,workerDatabase,selectionService
           WHERE j.enabled=true AND j.next_run_at<=$1 ORDER BY j.next_run_at,j.id LIMIT 10 FOR UPDATE OF j SKIP LOCKED`,[now])).rows;
         const occurrences=[];
         for(const schedule of due) {
+          // Discovery is global, but trigger reads and writes use this exact
+          // persisted installation; it is reauthorized before execution.
+          await client.query("SELECT set_config('app.shop_id',$1,true)",[schedule.shop_id]);
           if(!Object.hasOwn(INTERVALS,schedule.recurrence))fail(C.CONTRACT_MISMATCH,"Unsupported persisted recurrence");
           const next=new Date(new Date(schedule.next_run_at).getTime()+INTERVALS[schedule.recurrence]);
           const occurrence=(await client.query(`INSERT INTO mirror.schedule_occurrences(id,shop_id,schedule_id,scheduled_for,template,operation)
@@ -186,7 +191,7 @@ export function createSchedulesService({database,workerDatabase,selectionService
       return transaction(async client=>{
         const occurrence=(await client.query(`SELECT o.id,o.command_id,o.installation_version FROM mirror.schedule_occurrences o
           JOIN mirror.shops s ON s.id=o.shop_id AND s.installation_version=o.installation_version AND s.uninstalled_at IS NULL
-          WHERE o.shop_id=$1 AND o.id=$2 AND o.status IN('QUEUED','RUNNING','RETRY','FAILED','DISPATCHED','EXECUTING') FOR UPDATE OF o`,[shopId,occurrenceId])).rows[0];
+          WHERE o.shop_id=$1 AND o.id=$2 AND o.status IN('QUEUED','RUNNING','RETRY','DISPATCHED','EXECUTING') FOR UPDATE OF o`,[shopId,occurrenceId])).rows[0];
         if(!occurrence)return false;
         if(occurrence.command_id)await client.query(`UPDATE mirror.job_commands SET cancel_requested_at=COALESCE(cancel_requested_at,clock_timestamp()),updated_at=clock_timestamp()
           WHERE shop_id=$1 AND id=$2 AND installation_version=$3 AND status IN('PENDING','RUNNING','RETRY')`,[shopId,occurrence.command_id,occurrence.installation_version]);

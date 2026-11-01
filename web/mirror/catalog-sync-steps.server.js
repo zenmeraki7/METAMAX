@@ -14,6 +14,13 @@ export const CATALOG_INPUT_HASH=createHash('sha256').update(PRODUCTS_BULK_QUERY)
 const uncertain=()=>new SyncWorkerError('BULK_START_UNCERTAIN','Bulk start requires authoritative recovery',{retryable:true,outcomeUncertain:true});
 const terminal=message=>new SyncWorkerError('REMOTE_TERMINAL',message,{retryable:false});
 const count=value=> /^(0|[1-9][0-9]*)$/.test(String(value)) && !(typeof value==='number'&&!Number.isSafeInteger(value)) && BigInt(value)<=9223372036854775807n;
+async function atStage(stage,work) {
+  try{return await work();}catch(error){
+    // Diagnostic data only; preserve the original failure and retry semantics.
+    try{Object.defineProperty(error,'catalogStage',{value:stage,configurable:true});}catch{}
+    throw error;
+  }
+}
 
 export function createCatalogSyncSteps({database,clientFactory,fetchImpl=fetch}) {
   const sync=createSyncRunService({database});
@@ -90,14 +97,14 @@ export function createCatalogSyncSteps({database,clientFactory,fetchImpl=fetch})
       return {kind:'ADVANCE'};
     },
     async ingestChunk({claim,signal}) {
-      const {row,runner}=await context(claim);
+      const {row,runner}=await atStage('CONTEXT',()=>context(claim));
       if(row.ingestion_status==='SUCCEEDED'&&row.generation_status==='RECONCILING')return {kind:'ADVANCE'};
       const op=await runner.bulkSync.getStatus({shopId:claim.shopId,bulkOperationId:row.bulk_operation_id});
-      const staged=await stageCatalogExport({op,claim,runId:row.run_id,owned:work=>owned(claim,work),fetchImpl,signal});
+      const staged=await atStage('DOWNLOAD',()=>stageCatalogExport({op,claim,runId:row.run_id,owned:work=>owned(claim,work),fetchImpl,signal}));
       if(!staged.complete)return {kind:'DEFER',delayMs:1000};
       const lines=staged.lines;
-      const receipt=await runner.ingestJsonlLines({shopId:claim.shopId,generationId:claim.generationId,runId:row.run_id,
-        fence:row.ingestion_fence,lines,signal,cancelOnAbort:false,batchSize:100,maxNewChunks:5});
+      const receipt=await atStage('IMPORT',()=>runner.ingestJsonlLines({shopId:claim.shopId,generationId:claim.generationId,runId:row.run_id,
+        fence:row.ingestion_fence,lines,signal,cancelOnAbort:false,batchSize:100,maxNewChunks:5}));
       return receipt.succeeded ? {kind:'ADVANCE'} : {kind:'DEFER',delayMs:1000};
     },
     reconcile: reconcilePending,

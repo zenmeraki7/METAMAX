@@ -1,12 +1,11 @@
 # METAMAX storage contract
 
-Deployment update, 29 October 2026: all eight migrations are now applied to the
-application's configured `newmeta_app` database on branch
-`express-backend-20261027`. Canonical models and the refreshed live snapshot have
-zero drift. See `../../docs/live-database-migrations-20261029.md` for verification
-and `../../docs/catalog-phase-integration.md` for the execution extension and
-its verification. Earlier isolated-branch notes below record
-the prior baseline work.
+Current schema reconciliation: 1 November 2026. Canonical models preserve the
+existing domain files and physical table mappings, including the full migrated
+Edit History contract and database coordination columns. The ordered SQL
+migrations remain authoritative for custom checks, functions, triggers, RLS
+policies and privileges. Prisma validation is not a role/concurrency certificate.
+Run npm run test:roles:postgres and the database integration suites below.
 
 `schema.prisma` contains the generator and datasource. The adjacent domain files
 define the shared PostgreSQL catalog and execution state using Prisma ORM 7.10.1.

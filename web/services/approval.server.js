@@ -169,6 +169,9 @@ export function createApprovalService({
       try {
         if (!isExternalClient) {
           await txClient.query("BEGIN ISOLATION LEVEL REPEATABLE READ");
+          // The authenticated actor and current approval authorization above
+          // establish the shop; pool connections start without tenant settings.
+          await txClient.query("SELECT set_config('app.shop_id',$1,true)",[shopId]);
         }
 
         // 1. Verify selection snapshot is approved, valid, and unexpired
