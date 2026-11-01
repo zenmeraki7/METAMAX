@@ -1,3 +1,4 @@
+import {createInstallationResolver} from '../security/installation-lifecycle.server.js';
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import {createFilterAuthentication} from "../middleware/filter-auth.server.js";
@@ -14,8 +15,10 @@ const OTHER_SHOP = "other-merchant.myshopify.com";
 // Policy fixtures explicitly install trusted identity/storage dependencies.
 // Production does not support defaultScopes or caller-supplied sessions.
 function createFieldAuthorizationService({defaultScopes, ...options} = {}) {
-  const service = createMerchantFieldAuthorizationService({
-    database: createMockDatabase(), resolveShop: async ctx => ctx.shop,
+  const database=options.database??createMockDatabase();
+  const resolveInstallation=createInstallationResolver({readInstallation:async shop=>{const row=(await database.query('SELECT installation_version,uninstalled_at FROM mirror.shops WHERE id=$1',[shop])).rows[0];return row?{...row,installation_version:row.installation_version??'install-1'}:null;}});
+  const service = createMerchantFieldAuthorizationService({resolveTenant:ctx=>resolveInstallation(ctx.shop),
+    database, resolveShop: async ctx => ctx.shop,
     getShopScopes: async () => defaultScopes ?? [], ...options,
   });
   return {authorizeAccess: input => service.authorizeAccess({authContext: {shop: VALID_SHOP}, ...input})};
@@ -33,17 +36,17 @@ function createMockDatabase({ rows = [{ id: VALID_SHOP, uninstalled_at: null }] 
 }
 
 test("merchant authorization rejects optional identity, ambient sessions and default grants", () => {
-  const options={database:createMockDatabase(),resolveShop:async()=>VALID_SHOP,getShopScopes:async()=>["read_products"]};
-  for(const missing of ["database","resolveShop","getShopScopes"])assert.throws(()=>createMerchantFieldAuthorizationService({...options,[missing]:undefined}));
+  const options={resolveTenant:async()=>null,database:createMockDatabase(),resolveShop:async()=>VALID_SHOP,getShopScopes:async()=>["read_products"]};
+  for(const missing of ["resolveTenant","resolveShop","getShopScopes"])assert.throws(()=>createMerchantFieldAuthorizationService({...options,[missing]:undefined}));
   for(const extra of [{defaultScopes:["write_products"]},{sessionStorage:{loadSession:async()=>({scope:"write_products"})}}])assert.throws(()=>createMerchantFieldAuthorizationService({...options,...extra}));
 });
 
 test("opaque merchant identity and current stored scopes are required on every decision", async () => {
-  let stored={id:"merchant",shop:VALID_SHOP,scope:"read_products",accessToken:"secret"};
-  const authentication=createFilterAuthentication({sessionStorage:{loadSession:async()=>stored}});
-  const req={};authentication.capture(req,{locals:{shopify:{session:stored}}},()=>{});
+  let stored={isOnline:false,id:"merchant",shop:VALID_SHOP,scope:"read_products",accessToken:"secret"};
+  const authentication=createFilterAuthentication({resolveInstallation:createInstallationResolver({readInstallation:async()=>({installation_version:'install-1'})}),sessionStorage:{loadSession:async()=>stored}});
+  const req={};await authentication.capture(req,{locals:{shopify:{session:stored}}},()=>{});
   const context=await authentication.authenticate(req);
-  const service=createMerchantFieldAuthorizationService({database:createMockDatabase(),resolveShop:authentication.resolveShop,
+  const service=createMerchantFieldAuthorizationService({database:createMockDatabase(),resolveShop:authentication.resolveShop,resolveTenant:authentication.resolveTenant,
     getShopScopes:async(shop,auth)=>(await authentication.resolveSession(auth)).scope});
   const input={shopId:VALID_SHOP,authContext:context,access:"read",operation:"filter",field:{id:"product.title"},source:{adapterId:"reader",accessAnyOf:["read_products"]}};
   assert.equal(await service.authorizeAccess(input),true);

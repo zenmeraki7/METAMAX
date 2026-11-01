@@ -1,3 +1,4 @@
+import {loadMigrationEnvironment} from '../security/migration-environment.server.js';
 /** Deployment for the explicitly authorized dispatch migration chain.
  * Credentials are inherited in child environments, never written or printed.
  * Scratch validation and live deployment use pinned, distinct destinations.
@@ -26,7 +27,7 @@ const web=fileURLToPath(new URL('../',import.meta.url)),audit=new URL('../../.au
 await mkdir(audit,{recursive:true});
 const envBytes=await readFile(new URL('../.env',import.meta.url));
 const envHash=createHash('sha256').update(envBytes).digest('hex');
-const local=dotenv.parse(envBytes);
+const local=loadMigrationEnvironment();
 const live=new URL(process.env.DIRECT_DATABASE_URL||local.DIRECT_DATABASE_URL||'');
 if(live.hostname!==liveHost||live.pathname!=='/newmeta_app'||live.hostname.includes('-pooler'))throw new Error('Configured live target changed');
 live.searchParams.set('schema','mirror');

@@ -10,6 +10,21 @@ import { product, variant } from "./integration/sync-hardening.js";
 const shopId = "catalog-writer-test.myshopify.com";
 const generationId = "gen-writer-1";
 
+test("one high-variant product uses bounded batches with exact tenant and parent bindings",async()=>{
+  const queries=[];const variants=Array.from({length:100},(_,index)=>variant(1000+index));
+  const record=product(99,variants);
+  const client={async query(sql,params){queries.push({sql,params});
+    return sql.includes('INSERT INTO mirror.products') ? {rows:[{id:'501',shopify_id:record.id}],rowCount:1} : {rows:[],rowCount:0};}};
+  await writeCatalogProducts({client,shopId,generationId,records:[record]});
+  const inserts=queries.filter(({sql})=>sql.includes('INSERT INTO mirror.variants'));
+  assert.equal(inserts.length,1);assert.ok(queries.length<=4);
+  const saved=JSON.parse(inserts[0].params[2]);assert.equal(saved.length,100);
+  assert.deepEqual(saved.map(item=>item.shopify_id),variants.map(item=>item.id));
+  assert.ok(saved.every(item=>item.product_id==='501'));
+  assert.ok(queries.every(({params})=>params[0]===shopId && params[1]===generationId));
+  assert.ok(queries.some(({sql})=>sql.includes('v.product_id<>incoming.product_id')));
+});
+
 test("catalog-writer: rejects invalid shop domain or generation identity", async () => {
   const mockClient = { async query() { return { rows: [{ id: 1 }] }; } };
 

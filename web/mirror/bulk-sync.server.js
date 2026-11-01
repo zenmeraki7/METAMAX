@@ -1,3 +1,4 @@
+import {boundBulkStatus} from './bulk-cleanup-result.server.js';
 import { setTimeout as delay } from "node:timers/promises";
 import { invalid, shop } from "./transactions.server.js";
 
@@ -217,43 +218,40 @@ export function createBulkSyncService({ shopifyClient, syncRunService }) {
       }
     },
 
-    /**
-     * Cancel an owned bulk query, persisting local cancellation first.
+    /** Local fencing commits first. Input: owned run and optional reconciliation
+     * hint. Output separates requested/cancelling/terminal cleanup and uncertainty.
+     * A nonterminal result is not an error or a terminal acknowledgment. Caller
+     * must keep durable cancellation intent eligible until exact terminal proof.
      */
-    async cancelBulkQuery({ shopId, runId }) {
+    async cancelBulkQuery({ shopId, runId, reconcile = false }) {
       shop(shopId);
       const run = await syncRunService.getSyncRun({ shopId, runId });
       if (!run) invalid("Owned run required");
-
-      // Persist cancellation locally first, even if network request subsequently fails.
-      await syncRunService.cancelGeneration({
-        shopId,
-        generationId: run.generationId,
+      await syncRunService.cancelGeneration({ shopId, generationId: run.generationId });
+      const result=(observed=null)=>Object.freeze({
+        cancelled:observed?.terminal===true,remote:observed?.terminal===true,
+        state:observed?.terminal?'CANCELLED':observed?.status==='CANCELING'?'CANCELLING':'CANCELLATION_REQUESTED',
+        cancelPending:observed?.terminal!==true,outcomeUncertain:!observed||!observed.terminal&&observed.status!=='CANCELING',
+        remoteStatus:observed?.status??null,
       });
-
-      if (!run.bulkOperationId) {
-        return { cancelled: true, remote: false };
+      // A missing binding does not prove that an interrupted start never reached
+      // Shopify. Preserve cleanup uncertainty instead of adopting an orphan.
+      if (!run.bulkOperationId) return result();
+      const observe=async()=>boundBulkStatus(await shopifyClient.request(BULK_STATUS_QUERY,
+        {variables:{id:run.bulkOperationId}}),run.bulkOperationId);
+      try {
+        if(reconcile){const current=await observe();if(current.terminal||current.status==='CANCELING')return result(current);}
+        const observed=boundBulkStatus(await shopifyClient.request(BULK_CANCEL_MUTATION,
+          {variables:{id:run.bulkOperationId}}),run.bulkOperationId,{cancellation:true});
+        return result(observed);
+      } catch {
+        try{return result(await observe());}catch{return result();}
       }
-
-      const response = await shopifyClient.request(BULK_CANCEL_MUTATION, {
-        variables: { id: run.bulkOperationId },
-      });
-
-      if (
-        response.errors ||
-        response.data?.bulkOperationCancel?.bulkOperation?.id !==
-          run.bulkOperationId ||
-        response.data?.bulkOperationCancel?.userErrors?.length
-      ) {
-        invalid("Remote cancellation requires retry");
-      }
-
-      return { cancelled: true, remote: true };
     },
 
     /** Alias for cancelBulkCatalogExport */
-    async cancelBulkCatalogExport({ shopId, runId }) {
-      return service.cancelBulkQuery({ shopId, runId });
+    async cancelBulkCatalogExport({ shopId, runId, reconcile = false }) {
+      return service.cancelBulkQuery({ shopId, runId, reconcile });
     },
 
     /**

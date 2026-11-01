@@ -1,3 +1,7 @@
+// Interface contract (repository root): docs/backend-interface-contracts.md#history-admission-handoff-and-execution
+import {acquireResourceFamilies} from '../security/resource-family-admission.server.js';
+import {createItemHistoryAuthority} from './item-completion.server.js';
+import {createHistoryJobFinalizer} from './job-finalization.server.js';
 /**
  * Phase 2 history persistence and Bulk Edit Engine integration.
  * Transactional admission, dispatch, and authenticated reads require trusted
@@ -134,7 +138,7 @@ async function insertChange(tx, op, entry, valueProtection, context) {
   return { changeId, snapshotId, fieldId: i.identity.fieldId,resourceGid:i.identity.resourceGid };
 }
 
-function operationRecord(row) {
+export function operationRecord(row) {
   requireHistoryReader(row.contract_version);
   if (row.fingerprint_scheme !== HISTORY_FINGERPRINT_SCHEME) fail(C.UNSUPPORTED_VERSION, 'Unsupported history fingerprint scheme');
   return canonicalHistoryJson({ operationId: row.id,executionJobId: row.execution_job_id,editOperationId: row.edit_operation_id,
@@ -178,7 +182,9 @@ export function createHistoryRepository({ database, resolveTenant, loadExecution
   assertHistoryValueProtection(valueProtection);
   if(authorizeHistoryValueRead!==undefined&&typeof authorizeHistoryValueRead!=='function')throw TypeError('Trusted value reveal authorization required');
   database=protectedHistoryDatabase(database,'runtime',{authorityRelations});
-  async function execute(raw, dispatch) {
+  const itemAuthority=createItemHistoryAuthority({resolveTenant,loadExecutionPlan,authorizeRecovery,executionAdapter,invokeFor:createHistoryHookInvoker});
+  async function execute(raw, dispatch, dispatchGuard) {
+    if(dispatchGuard!==undefined&&typeof dispatchGuard!=='function')throw TypeError('Transaction-scoped dispatch guard required');
     record(raw, ['authContext', 'operationId', 'mutationId', 'claim', 'entries']);
     if (!raw.authContext || !uuid(raw.operationId) || typeof raw.mutationId !== 'string' || !raw.mutationId || raw.mutationId.length > 512) fail(C.INVALID_INPUT, 'Authenticated operation and mutation references required');
     const claim = canonicalHistoryJson(record(raw.claim, ['fenceEpoch', 'executionClaimId', 'leaseToken']));
@@ -217,6 +223,7 @@ export function createHistoryRepository({ database, resolveTenant, loadExecution
         bigintId(plan.executionJobId); bigintId(plan.editOperationId);
         if (![plan.executionFingerprint,plan.filterFingerprint,plan.fieldResolutionFingerprint,plan.approvedContractFingerprint,plan.mutationPlanFingerprint].every(hash)) fail(C.BINDING_CONFLICT, 'Authoritative engine fingerprints required');
         const { command,contract,selection,generation,coverage,assertClaim } = await executionAdapter.lockAuthority({ client: tx,tenant,plan,claim });
+        executionAdapter.assertRequestCapabilities({entries});
         if (await invoke(authorizePlan,{ client: tx, authContext, tenant, plan, contract }) !== true) fail(C.UNAUTHORIZED, 'Current Field/Filter Engine authorization required');
         if (!Array.isArray(plan.fields) || plan.fields.length !== entries.length) fail(C.BINDING_CONFLICT, 'Complete authoritative field set required');
         match(plan.fields.map(f=>historyMemberKey(f.identity)).sort(), [...memberKeys].sort(), 'Authoritative field set differs');
@@ -374,20 +381,8 @@ export function createHistoryRepository({ database, resolveTenant, loadExecution
             WHERE shop_id=$1 AND installation_id=$2 AND id=$3`, [tenant.shopId,tenant.installationId,operationId,entries.length]);
         }
         if (dispatch) {
-          if(await invoke(authorizeDispatch,{authContext,tenant,plan,contract,operation:'dispatch'})!==true)fail(C.UNAUTHORIZED,'Independent execution dispatch authorization required');
-          // Serialize family admission across distinct commands. The serializable
-          // predicate below remains a durable barrier after this short lock ends:
-          // an uncertain request must be reconciled before another writer starts.
-          for(const family of [...new Set(entries.map(e=>e.resourceFamilyGid))].sort()){
-            const lock=await tx.query('SELECT pg_try_advisory_xact_lock(hashtextextended($1,0)) AS acquired',
-              [JSON.stringify([tenant.shopId,family])]);
-            if(!lock.rows[0]?.acquired)fail(C.OWNERSHIP_LOST,'Resource family is being admitted by another execution');
-          }
-          const competing=await tx.query(`SELECT 1 FROM edit_history.changes WHERE shop_id=$1
-            AND resource_family_gid=ANY($3::text[]) AND mutation_state IN('DISPATCHING','OUTCOME_UNKNOWN','ACKNOWLEDGED')
-            AND NOT(installation_id=$2 AND operation_id=$4 AND mutation_id=$5 AND attempt_id=$6) LIMIT 1`,
-            [tenant.shopId,tenant.installationId,[...new Set(entries.map(e=>e.resourceFamilyGid))],operationId,mutationId,plan.attemptId]);
-          if(competing.rows.length)fail(C.INVALID_TRANSITION,'Resource family has an unresolved mutation; reconcile before writing');
+          if(await invoke(async context=>{if(dispatchGuard)await dispatchGuard(context.client);return authorizeDispatch(context);},{authContext,tenant,plan,contract,operation:'dispatch'})!==true)fail(C.UNAUTHORIZED,'Independent execution dispatch authorization required');
+          await acquireResourceFamilies({tx,tenant,families:entries.map(e=>e.resourceFamilyGid),operationId,mutationId,attemptId:plan.attemptId});
           dispatchToken = randomBytes(32).toString('base64url');
           const bound = await tx.query(`UPDATE edit_history.mutation_requests
             SET request_state='DISPATCH_AUTHORIZED', dispatch_authorized_at=clock_timestamp(), updated_at=clock_timestamp(),dispatch_token_hash=$6
@@ -404,7 +399,7 @@ export function createHistoryRepository({ database, resolveTenant, loadExecution
         // Verifiers may await IO; lease eligibility uses DB time again at commit.
         if (await invoke(authorizePlan,{ client: tx, authContext, tenant, plan, contract }) !== true) fail(C.UNAUTHORIZED, 'Execution authorization changed during admission');
         match(canonicalHistoryJson(await invoke(resolveTenant,{ client: tx, authContext })), tenant, 'Authenticated installation changed during admission');
-        if(dispatch&&await invoke(authorizeDispatch,{authContext,tenant,plan,contract,operation:'dispatch'})!==true)fail(C.UNAUTHORIZED,'Dispatch authorization changed');
+        if(dispatch&&await invoke(async context=>{if(dispatchGuard)await dispatchGuard(context.client);return authorizeDispatch(context);},{authContext,tenant,plan,contract,operation:'dispatch'})!==true)fail(C.UNAUTHORIZED,'Dispatch authorization changed');
         await tx.query('SET CONSTRAINTS ALL IMMEDIATE');
         await assertClaim();
         await tx.query('COMMIT');
@@ -511,7 +506,15 @@ export function createHistoryRepository({ database, resolveTenant, loadExecution
   const repository=Object.freeze({
     ...createHistoryPages({database,executionAdapter,resolveTenant,authorizeHistoryRead,historyCursorSecret,operationRecord}),
     ...createHistoryLifecycle({database,executionAdapter,resolveTenant,authorizeRecovery,authorizeDispatch,loadMutationEvidence,verifyMutationEvidence,valueProtection}),
-    prepareRequest: input => execute(input, false),beginDispatch: input => execute(input, true),
+    finalizeExecutionJob:createHistoryJobFinalizer({database,resolveTenant,authorizeRecovery,executionAdapter}),
+    prepareRequest: input => execute(input, false),beginDispatch: (input,{dispatchGuard}={}) => execute(input, true,dispatchGuard),
+    verifyItemCompletion: input=>itemAuthority({...input,completion:true}),
+    async inspectItem(input){
+      const tx=await database.connect();
+      try{await tx.query('BEGIN');await tx.query("SET LOCAL statement_timeout='15000ms'");await tx.query("SET LOCAL lock_timeout='2000ms'");
+        const result=await itemAuthority({...input,tx,completion:false});await tx.query('COMMIT');return result;
+      }catch(error){await tx.query('ROLLBACK').catch(()=>{});throw error;}finally{tx.release();}
+    },
     getOperation: input => read(input,'read_operation'),getRequest: input => read(input,'read_request'),getSnapshot: input => read(input,'read_snapshot'),
   });
   issuedRepositories.add(repository);

@@ -1,5 +1,5 @@
 import { runSyncDbTransaction } from "./sync-db-transaction.server.js";
-import { invalid } from "./transactions.server.js";
+import { lockMirror, invalid } from "./transactions.server.js";
 import { getInstalledFilterSchemaOptions } from "../services/filter-schema.server.js";
 import { verifyCatalogCheckpoints } from "./sync-checkpoints.server.js";
 import { CATALOG_EXECUTION_MAPPING } from "./sync-domain-schema.server.js";
@@ -24,10 +24,11 @@ export async function createCatalogSyncRunDbAdapter({database,prisma,dispatchRep
 export const pgTransactionClient = tx => ({ query:async (text, values=[]) => {
   const rows=await tx.$queryRawUnsafe(text,...values);return {rows,rowCount:rows.length};
 } });
-export const executionTransaction = (database, work) => runSyncDbTransaction({database,
+export const executionTransaction = (database, work) => runSyncDbTransaction({database,isolationLevel:'ReadCommitted',
   work:tx=>work(pgTransactionClient(tx))});
 
 export async function lockCatalogExecution(client, claim, { recovery=false }={}) {
+  await lockMirror(client,claim.shopId);
   const row=(await client.query(`SELECT e.*,j.installation_version,j.run_id,j.expected_generation_id,
       r.fence AS ingestion_fence,r.status AS ingestion_status,r.bulk_operation_id,
       g.status AS generation_status
@@ -85,9 +86,10 @@ export function createCatalogEvidenceValidators() {
       }
       if(!await durableIngestion(tx,run))return false;
       if(run.phase==='INGESTING')return true;
+      // Late webhooks do not erase durable verification evidence. PUBLISHING
+      // reconciles dirty revisions again and checks under its publication lock.
       return run.phase==='RECONCILING' && (await tx.$queryRawUnsafe(`SELECT 1 FROM mirror.generations g WHERE g.shop_id=$1 AND g.id=$2
         AND g.status='VERIFIED' AND g.verified_at IS NOT NULL
-        AND NOT EXISTS(SELECT 1 FROM mirror.catalog_changes c WHERE c.shop_id=g.shop_id AND c.dirty)
         AND NOT EXISTS(SELECT 1 FROM unnest(g.required_datasets) d(name) WHERE NOT EXISTS(
           SELECT 1 FROM mirror.coverage c WHERE c.shop_id=g.shop_id AND c.generation_id=g.id AND c.name=d.name AND c.status='COMPLETE'))`,
       run.shopId,run.generationId)).length===1;

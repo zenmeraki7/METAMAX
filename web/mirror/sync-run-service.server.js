@@ -16,7 +16,7 @@ export function createSyncRunService({ database }) {
     throw new TypeError("PostgreSQL pool required");
   async function lockedRun(client, shopId, runId, fence) {
     shop(shopId);
-    await lockMirror(client);
+    await lockMirror(client,shopId);
     const row = (
       await client.query(
         `SELECT r.*, r.lease_until > clock_timestamp() AS live, g.status AS generation_status
@@ -79,6 +79,7 @@ export function createSyncRunService({ database }) {
       )
         invalid("Unsupported dataset replacement contract");
       const allocate = async (client) => {
+        await lockMirror(client,shopId);
         if (
           !(
             await client.query(
@@ -174,7 +175,7 @@ export function createSyncRunService({ database }) {
           processedLines: BigInt(run.processed_lines),
         };
       };
-      return suppliedClient ? allocate(suppliedClient) : transaction(database, allocate);
+      return suppliedClient ? allocate(suppliedClient) : transaction(database, allocate, shopId);
     },
     async bindBulkOperationId({ shopId, runId, fence, bulkOperationId }) {
       if (
@@ -190,7 +191,7 @@ export function createSyncRunService({ database }) {
           `UPDATE mirror.ingestion_runs SET bulk_operation_id=$3 WHERE shop_id=$1 AND id=$2`,
           [shopId, runId, bulkOperationId],
         );
-      });
+      }, shopId);
     },
     async renewRunLease({ shopId, runId, fence, workerId, leaseMs = 60000 }) {
       integer(leaseMs, 1000, 300000, "lease duration");
@@ -203,7 +204,7 @@ export function createSyncRunService({ database }) {
           [shopId, runId, leaseMs],
         );
         return true;
-      });
+      }, shopId);
     },
     async recordCheckpoint({
       client,
@@ -415,7 +416,7 @@ export function createSyncRunService({ database }) {
           `UPDATE mirror.ingestion_runs SET status='FAILED',last_error=$3,lease_token=NULL,lease_until=NULL WHERE shop_id=$1 AND id=$2`,
           [shopId, runId, String(error?.message ?? error).slice(0, 2000)],
         );
-      });
+      }, shopId);
     },
     async cancelGeneration({ shopId, generationId }) {
       return transaction(database, async (client) => {
@@ -441,7 +442,7 @@ export function createSyncRunService({ database }) {
           ],
         );
         return true;
-      });
+      }, shopId);
     },
     async retainGeneration({ shopId, generationId, until }) {
       const date = new Date(until);
@@ -457,7 +458,7 @@ export function createSyncRunService({ database }) {
           `UPDATE mirror.generations SET retain_until=GREATEST(retain_until,$3) WHERE shop_id=$1 AND id=$2`,
           [shopId, generationId, date],
         );
-      });
+      }, shopId);
     },
     async reclaimGeneration({ shopId, generationId }) {
       return transaction(database, async (client) => {
@@ -489,7 +490,7 @@ export function createSyncRunService({ database }) {
           `DELETE FROM mirror.generations WHERE shop_id=$1 AND id=$2`,
           [shopId, generationId],
         );
-      });
+      }, shopId);
     },
     async getSyncRun({ shopId, runId }) {
       shop(shopId);

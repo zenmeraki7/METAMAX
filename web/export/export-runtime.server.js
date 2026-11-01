@@ -9,6 +9,7 @@ import {createExportGenerationProtection,withExportExecutionAuthorization} from 
 import {createExportStorage} from "./export-storage.server.js";
 import {createExportSource,createExportCoverageRepository} from "./export-source.server.js";
 import {createExportRepository} from "./export-repository.server.js";
+import {createExportControlAdapter} from './export-control-adapter.server.js';
 import {createExportService} from "./export-service.server.js";
 import {createExportQueueEvidence,createExportDispatcher,EXPORT_QUEUE_NAME} from "./export-dispatch.server.js";
 import {createExportWorker} from "./export-worker.server.js";
@@ -99,7 +100,7 @@ export async function createExportRuntime({database,sessionStorage,cursorSecret,
       }},
       fieldService:runtime.fieldService,filterService:runtime.compiler});
     let started=false;
-    return Object.freeze({authentication:runtime.authentication,service,repository,storage,source,
+    return Object.freeze({authentication:runtime.authentication,service,repository,controlRepository:createExportControlAdapter(repository),storage,source,
       start(){if(started)return;started=true;dispatcher.start();void bullWorker.run().catch(error=>logger.error?.({code:error.code??"EXPORT_WORKER_STOPPED"},"Export BullMQ runner stopped"));},
       async stop(){await dispatcher.stop();await bullWorker.pause(true);await worker.stop();await bullWorker.close();await queue.close();s3.destroy();},
     });

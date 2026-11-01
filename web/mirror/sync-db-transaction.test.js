@@ -25,7 +25,7 @@ test("Prisma uses Serializable and commands for timeout configuration before the
   const sql=f.calls.filter(c=>c.sql);
   assert.match(sql[0].sql,/SET LOCAL statement_timeout/);assert.equal(sql[0].method,"execute");
   assert.match(sql[1].sql,/SET LOCAL lock_timeout/);
-  assert.match(sql[2].sql,/LOCK TABLE "mirror"\."publications" IN ACCESS EXCLUSIVE MODE/);
+  assert.match(sql[2].sql,/LOCK TABLE "mirror"\."publications" IN ACCESS SHARE MODE/);
   assert.equal(sql[3].method,"query");assert.deepEqual(sql[3].values,[1]);
 });
 

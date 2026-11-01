@@ -1,3 +1,4 @@
+import {loadMigrationEnvironment} from '../security/migration-environment.server.js';
 /** Read-only preflight. Uses the configured database; never deploys migrations
  * and never prints connection strings, credentials or merchant row contents. */
 import {readFile,readdir} from 'node:fs/promises';
@@ -10,7 +11,7 @@ try {
   const file=await readFile(new URL('../.env',import.meta.url),'utf8').catch(error=>{
     if(error.code==='ENOENT')return '';throw error;
   });
-  const local=dotenv.parse(file);
+  const local=loadMigrationEnvironment();
   const connectionString=process.env.DIRECT_DATABASE_URL||local.DIRECT_DATABASE_URL||process.env.DATABASE_URL||local.DATABASE_URL;
   if(!connectionString)throw Object.assign(new Error('Missing configured database'),{code:'DATABASE_NOT_CONFIGURED'});
   const root=new URL('../prisma/migrations/',import.meta.url);

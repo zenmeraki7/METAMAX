@@ -14,7 +14,7 @@ async function withServer(app, callback) {
 for (const mode of ["missing", "forged", "late", "denied", "swapped", "valid"]) {
   test(`filter router enforces Shopify request verification: ${mode}`, async () => {
     const app = express(), calls = [];
-    const session = { id: "verified", shop: "owner.myshopify.com", accessToken: "stored-token" };
+    const session = { id: "verified", shop: "owner.myshopify.com", accessToken: "stored-token",isOnline:false };
     const guard = createShopifyAuthMiddleware({ shopify: {
       validateAuthenticatedSession: () => (_req, res, next) => {
         calls.push("verify");

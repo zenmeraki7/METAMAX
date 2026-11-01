@@ -29,6 +29,7 @@ import {
   CANONICAL_FIELDS,
   requireCanonicalField,
 } from "./canonical.js";
+import {requireInstalledWriteCapability,WRITE_CAPABILITY_VERSION} from './write-capabilities.js';
 
 import {
   normalizeFieldValue,
@@ -40,7 +41,7 @@ import {
   METAFIELD_DEFINITION_TOKEN_PATTERN,
 } from "./metafield-identity.js";
 
-export const CONSTRAINTS_VERSION = 3;
+export const CONSTRAINTS_VERSION = 5;
 
 export const POLICY_CONTEXT = deepFreeze({
   READ: "read",
@@ -373,7 +374,7 @@ function validateNormalization(field, raw) {
 
 const REPRESENTATION_OVERRIDES = deepFreeze({
   "product.status": {
-    enumValues: ["ACTIVE", "DRAFT", "ARCHIVED"],
+    enumValues: ["ACTIVE", "DRAFT", "ARCHIVED", "UNLISTED"],
   },
 
   "variant.inventoryPolicy": {
@@ -849,7 +850,7 @@ export function getFieldPolicy(
     constraints: entry[context],
     operations:
       context === P.WRITE && entry.writePolicy
-        ? entry.writePolicy.operations
+        ? listFieldWriteOperations(field.id)
         : [],
   });
 }
@@ -898,6 +899,13 @@ export function assertFieldWriteOperation(
 }
 
 export function listFieldWriteOperations(fieldId) {
+  return Object.freeze(listStructuralFieldWriteOperations(fieldId).filter(operation=>{
+    try{requireInstalledWriteCapability(fieldId,operation,WRITE_CAPABILITY_VERSION);return true;}catch{return false;}
+  }));
+}
+
+/** Pure operand-normalization policy, explicitly separate from installed support. */
+export function listStructuralFieldWriteOperations(fieldId) {
   const field = requireCanonicalField(fieldId);
 
   return (

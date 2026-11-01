@@ -101,7 +101,7 @@ export function createGenerationRepository({ database } = {}) {
     },
 
     /**
-     * promoteAtomically: Atomic promotion to PUBLISHED with coarse lock,
+     * promoteAtomically: Atomic promotion to PUBLISHED with a tenant lock,
      * fencing check, superseded pointer protection, and previous generation retention.
      */
     async promoteAtomically({
@@ -116,7 +116,7 @@ export function createGenerationRepository({ database } = {}) {
       expectedCurrentGenerationId,
     }) {
       return transaction(database, async (txClient) => {
-        await lockMirror(txClient);
+        await lockMirror(txClient,shopId);
 
         // 1. Lock and inspect candidate generation
         const genRes = await txClient.query(
@@ -234,7 +234,7 @@ export function createGenerationRepository({ database } = {}) {
         );
 
         return { kind: "PUBLISHED" };
-      });
+      }, shopId);
     },
 
     /**
@@ -278,7 +278,7 @@ export function createGenerationRepository({ database } = {}) {
         );
 
         return { kind: "RETAINED" };
-      });
+      }, shopId);
     },
 
     /**
@@ -292,7 +292,7 @@ export function createGenerationRepository({ database } = {}) {
           [shopId, generationId, referenceId],
         );
         return { kind: res.rowCount > 0 ? "RELEASED" : "NOT_FOUND" };
-      });
+      }, shopId);
     },
 
     /**
@@ -342,7 +342,7 @@ export function createGenerationRepository({ database } = {}) {
         }
 
         return { kind: "RECLAIMING" };
-      });
+      }, shopId);
     },
 
     /**
@@ -425,7 +425,7 @@ export function createGenerationRepository({ database } = {}) {
         );
 
         return { kind: "RECLAIMED" };
-      });
+      }, shopId);
     },
   });
 }

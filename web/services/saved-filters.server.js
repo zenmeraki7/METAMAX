@@ -2,6 +2,7 @@
 import {randomUUID,createHash} from "node:crypto";
 import {FieldError,FIELD_ERROR_CODES as C} from "../fields/types.js";
 import {parseFilterAst} from "../filters/ast.js";
+import {fingerprintFilterAst} from '../filters/fingerprint.js';
 const fail=(code,message)=>{throw new FieldError(code,message);};
 export function createSavedFiltersService({database,compiler,resolveShop,resolveDatasets,resolveSystemExecution}={}) {
   if(typeof database?.query!=="function"||typeof compiler?.validateFilter!=="function"||typeof resolveShop!=="function"||typeof resolveDatasets!=="function")throw new TypeError("Saved filters require trusted semantic validation, shop authentication and published context");
@@ -25,7 +26,9 @@ export function createSavedFiltersService({database,compiler,resolveShop,resolve
     if(!record)fail(C.INVALID_VALUE,"Saved filter not found");
     if(record.ast_version!==1||record.shop_id!==shopId)fail(C.CONTRACT_MISMATCH,"Unsupported saved filter version or shop");
     const {parsed,validated}=await validate(typeof record.ast==="string"?JSON.parse(record.ast):record.ast,authContext,shopId);
-    return Object.freeze({id:record.id,name:record.name,astVersion:1,ast:parsed,fingerprint:record.fingerprint,validated});
+    const canonicalFingerprint=fingerprintFilterAst(parsed),legacy=createHash('sha256').update(JSON.stringify(parsed)).digest('hex');
+    if(record.fingerprint!==canonicalFingerprint&&record.fingerprint!==legacy)fail(C.CONTRACT_MISMATCH,'Saved filter integrity mismatch');
+    return Object.freeze({id:record.id,name:record.name,astVersion:1,ast:parsed,fingerprint:canonicalFingerprint,fingerprintKind:'FILTER_AST',validated});
   }
   return Object.freeze({
     async saveFilter({authContext,name,ast,astVersion=1,...unsupported}={}) {
@@ -34,7 +37,7 @@ export function createSavedFiltersService({database,compiler,resolveShop,resolve
       const parsed=parseFilterAst(ast);
       if(Buffer.byteLength(JSON.stringify({name,ast:parsed,astVersion}))>131072)fail(C.INVALID_VALUE,"Saved filter request exceeds byte budget");
       await validate(parsed,authContext,shopId);
-      const fingerprint=createHash("sha256").update(JSON.stringify(parsed)).digest("hex");
+      const fingerprint=fingerprintFilterAst(parsed);
       return (await database.query(`INSERT INTO mirror.saved_filters(shop_id,id,name,ast_version,ast,fingerprint,updated_at)
         VALUES($1,$2,$3,$4,$5,$6,clock_timestamp()) RETURNING id,shop_id,name,ast_version,fingerprint,updated_at`,
       [shopId,randomUUID(),name.trim(),1,JSON.stringify(parsed),fingerprint])).rows[0];

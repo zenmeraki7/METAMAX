@@ -32,13 +32,16 @@ describe("actual PostgreSQL filter semantics", { concurrency: false,
   after(async () => {
     try { await pool.query(`DROP SCHEMA IF EXISTS ${ns} CASCADE`); } finally { await pool.end(); }
   });
-  await pool.query(`CREATE SCHEMA ${ns};
+  await pool.query(`CREATE SCHEMA IF NOT EXISTS mirror;
+    CREATE TABLE IF NOT EXISTS mirror.shops (id text PRIMARY KEY, installation_version text NOT NULL, uninstalled_at timestamptz);
+    INSERT INTO mirror.shops(id, installation_version) VALUES ('shop.myshopify.com', 'test-inst-1'), ('other.myshopify.com', 'test-inst-2') ON CONFLICT (id) DO NOTHING;
+    CREATE SCHEMA ${ns};
     CREATE TABLE ${ns}.products (
       id text COLLATE "pg_catalog"."C" NOT NULL, shop_id text NOT NULL, generation_id text NOT NULL,
       title text NOT NULL, vendor text, UNIQUE(shop_id, generation_id, id));
     CREATE TABLE ${ns}.variants (
       product_id text COLLATE "pg_catalog"."C" NOT NULL, shop_id text NOT NULL, generation_id text NOT NULL,
-      sku text, price numeric, taxable boolean);
+      sku text, price numeric, taxable boolean, deleted_at timestamptz);
     CREATE INDEX ON ${ns}.variants(shop_id, generation_id, product_id);
     CREATE TABLE ${ns}.publications (shop_id text, generation_id text, status text,
       coverage_revision text NOT NULL DEFAULT 'qa_coverage_v1', PRIMARY KEY(shop_id,generation_id));
@@ -188,7 +191,7 @@ describe("actual PostgreSQL filter semantics", { concurrency: false,
         const settings = (await input.client.query(`SELECT current_setting('transaction_read_only') AS readonly,
           current_setting('transaction_isolation') AS isolation, current_setting('statement_timeout') AS statement,
           current_setting('lock_timeout') AS lock`)).rows[0];
-        assert.deepEqual(settings, { readonly: "on", isolation: "repeatable read", statement: "5s", lock: "1s" });
+        assert.deepEqual(settings, { readonly: "on", isolation: "read committed", statement: "5s", lock: "1s" });
       } } });
     try {
       await blocker.query("BEGIN");
@@ -218,7 +221,7 @@ describe("actual PostgreSQL filter semantics", { concurrency: false,
   test("executor bounds actual PostgreSQL response bytes and rolls back before returning an oversized page", async () => {
     const writer = await pool.connect(), observed = observedDatabase();
     try {
-      await writer.query("BEGIN"); await publicationService.lockForWrite(writer);
+      await writer.query("BEGIN"); await publicationService.lockForWrite(writer,"shop.myshopify.com");
       await writer.query(`INSERT INTO ${ns}.products (id,shop_id,generation_id,title)
         SELECT repeat('x',6000) || n::text,$1,$2,'Oversized' FROM generate_series(1,100) AS n`, ["shop.myshopify.com", "g1"]);
       await writer.query("COMMIT");
@@ -229,7 +232,7 @@ describe("actual PostgreSQL filter semantics", { concurrency: false,
       assert.deepEqual(observed.events.slice(-2), ["ROLLBACK", "release"]);
     } finally {
       await writer.query("ROLLBACK");
-      await writer.query("BEGIN"); await publicationService.lockForWrite(writer);
+      await writer.query("BEGIN"); await publicationService.lockForWrite(writer,"shop.myshopify.com");
       await writer.query(`DELETE FROM ${ns}.products WHERE shop_id=$1 AND generation_id=$2 AND title='Oversized'`, ["shop.myshopify.com", "g1"]);
       await writer.query("COMMIT"); writer.release();
     }
@@ -237,14 +240,14 @@ describe("actual PostgreSQL filter semantics", { concurrency: false,
 
   test("HTTP runtime uses the real compiler and executor for authenticated pages, invalid input and scoped cursor replay", async () => {
     const sessions = new Map([
-      ["alpha", { id: "alpha", shop: "shop.myshopify.com", accessToken: "fixture-alpha" }],
-      ["beta", { id: "beta", shop: "other.myshopify.com", accessToken: "fixture-beta" }],
+      ["alpha", { id: "alpha", shop: "shop.myshopify.com", accessToken: "fixture-alpha", isOnline: false, scope: "read_products" }],
+      ["beta", { id: "beta", shop: "other.myshopify.com", accessToken: "fixture-beta", isOnline: false, scope: "read_products" }],
     ]);
     const verifiedSessions = new Map(sessions);
     const writer = await pool.connect();
     let server;
     try {
-      await writer.query("BEGIN"); await publicationService.lockForWrite(writer);
+      await writer.query("BEGIN"); await publicationService.lockForWrite(writer,"shop.myshopify.com");
       await writer.query(`INSERT INTO ${ns}.publications(shop_id,generation_id,status) VALUES ('other.myshopify.com','g1','PUBLISHED')`);
       await writer.query(`INSERT INTO ${ns}.coverage VALUES ('other.myshopify.com','g1','products'),('other.myshopify.com','g1','variants')`);
       await writer.query("COMMIT");
@@ -301,7 +304,7 @@ describe("actual PostgreSQL filter semantics", { concurrency: false,
       assert.equal((await request(continuation)).status, 403);
     } finally {
       if (server) await new Promise(resolve => server.close(resolve));
-      await writer.query("ROLLBACK"); await writer.query("BEGIN"); await publicationService.lockForWrite(writer);
+      await writer.query("ROLLBACK"); await writer.query("BEGIN"); await publicationService.lockForWrite(writer,"shop.myshopify.com");
       await writer.query(`DELETE FROM ${ns}.coverage WHERE shop_id='other.myshopify.com'`);
       await writer.query(`DELETE FROM ${ns}.publications WHERE shop_id='other.myshopify.com'`);
       await writer.query("COMMIT"); writer.release();
@@ -321,12 +324,12 @@ describe("actual PostgreSQL filter semantics", { concurrency: false,
     ]) {
       const writer = await pool.connect();
       try {
-        await writer.query("BEGIN"); await publicationService.lockForWrite(writer);
+        await writer.query("BEGIN"); await publicationService.lockForWrite(writer,"shop.myshopify.com");
         await writer.query(mutation); await writer.query("COMMIT");
         await assert.rejects(() => execute(compiled), { code: "FIELD_MISSING_DEPENDENCY" });
       } finally {
         await writer.query("ROLLBACK");
-        await writer.query("BEGIN"); await publicationService.lockForWrite(writer);
+        await writer.query("BEGIN"); await publicationService.lockForWrite(writer,"shop.myshopify.com");
         await writer.query(`UPDATE ${ns}.publications SET status='PUBLISHED',coverage_revision='qa_coverage_v1' WHERE shop_id='shop.myshopify.com' AND generation_id='g1'`);
         await writer.query(`INSERT INTO ${ns}.coverage VALUES ('shop.myshopify.com','g1','products') ON CONFLICT DO NOTHING`);
         await writer.query("COMMIT"); writer.release();
@@ -370,7 +373,7 @@ describe("actual PostgreSQL filter semantics", { concurrency: false,
     const variantQuery = await query(await contract(node("variant.price", "gt", "100")));
     const writer = await pool.connect();
     try {
-      await writer.query("BEGIN"); await publicationService.lockForWrite(writer);
+      await writer.query("BEGIN"); await publicationService.lockForWrite(writer,"shop.myshopify.com");
       await writer.query(`DELETE FROM ${ns}.coverage WHERE shop_id=$1 AND generation_id=$2 AND name='variants'`, ["shop.myshopify.com", "g1"]);
       await writer.query("COMMIT");
       assert.ok((await execute(productQuery)).productIds.length > 0);
@@ -380,7 +383,7 @@ describe("actual PostgreSQL filter semantics", { concurrency: false,
       await assert.rejects(() => executor.execute({ query: variantQuery, authContext, datasets: ["products"] }), { code: "FIELD_CONTRACT_MISMATCH" });
     } finally {
       await writer.query("ROLLBACK");
-      await writer.query("BEGIN"); await publicationService.lockForWrite(writer);
+      await writer.query("BEGIN"); await publicationService.lockForWrite(writer,"shop.myshopify.com");
       await writer.query(`INSERT INTO ${ns}.coverage VALUES ('shop.myshopify.com','g1','variants') ON CONFLICT DO NOTHING`);
       await writer.query("COMMIT"); writer.release();
     }
@@ -426,7 +429,7 @@ describe("actual PostgreSQL filter semantics", { concurrency: false,
     const waiting = E.createFilterExecutor({ database: observedPool, compiler, publicationService,
       resolveShop: async () => "shop.myshopify.com" });
     try {
-      await writer.query("BEGIN"); await publicationService.lockForWrite(writer);
+      await writer.query("BEGIN"); await publicationService.lockForWrite(writer,"shop.myshopify.com");
       await writer.query(`UPDATE ${ns}.publications SET status='RETIRED' WHERE shop_id=$1 AND generation_id=$2`, ["shop.myshopify.com", "g1"]);
       const read = waiting.execute({ query: compiled, authContext });
       const rejected = assert.rejects(read, { code: "FIELD_MISSING_DEPENDENCY" });
@@ -438,7 +441,7 @@ describe("actual PostgreSQL filter semantics", { concurrency: false,
       assert.equal(readerReleased, true);
     } finally {
       await writer.query("ROLLBACK");
-      await writer.query("BEGIN"); await publicationService.lockForWrite(writer);
+      await writer.query("BEGIN"); await publicationService.lockForWrite(writer,"shop.myshopify.com");
       await writer.query(`UPDATE ${ns}.publications SET status='PUBLISHED' WHERE shop_id=$1 AND generation_id=$2`, ["shop.myshopify.com", "g1"]);
       await writer.query("COMMIT"); writer.release();
     }

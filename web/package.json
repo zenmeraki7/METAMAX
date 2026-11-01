@@ -9,22 +9,25 @@
   },
   "scripts": {
     "dev": "cross-env NODE_ENV=development nodemon index.js --ignore ./frontend",
-    "serve": "cross-env NODE_ENV=production node index.js",
+    "serve": "node scripts/serve.mjs",
     "debug": "node --inspect-brk index.js",
     "test": "node --experimental-test-module-mocks --test export/*.test.js fields/*.test.js mirror/*.test.js services/*.test.js workers/*.test.js filters/__tests__/*.test.js edit-history/tests/history-contract.test.js edit-history/tests/history-repository.test.js edit-history/tests/execution-authority.test.js edit-history/tests/history-security.test.js edit-history/tests/snapshot-service.test.js edit-history/tests/undo-conflict.test.js edit-history/tests/undo-recovery.test.js template-tests/server.test.js",
     "history:verify-security": "node scripts/verify-history-security.js",
+    "history:maintenance": "node scripts/history-maintenance.mjs",
     "test:history": "node scripts/test-history.js",
     "test:history:postgres": "node scripts/test-filter-postgres.js --history",
     "test:history:upgrade": "node scripts/test-filter-postgres.js --history-upgrade",
     "test:fields": "node --experimental-test-module-mocks --test fields/*.test.js mirror/*.test.js",
     "test:filters": "node --experimental-test-module-mocks --test filters/__tests__/*.test.js",
     "test:postgres": "node scripts/test-filter-postgres.js",
+    "test:phase1:postgres": "node scripts/test-filter-postgres.js --phase1",
     "test:schema": "node scripts/test-filter-postgres.js --schema",
     "test:operations": "node scripts/test-filter-postgres.js --operations",
     "test:exports": "node scripts/test-filter-postgres.js --exports",
     "redis:check": "node scripts/check-redis.js",
     "db:check": "node scripts/check-db.js",
-    "db:verify:filters": "node scripts/verify-filter-schema.js"
+    "db:verify:filters": "node scripts/verify-filter-schema.js",
+    "verify:integration-imports": "node scripts/verify-integration-imports.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1160.0",

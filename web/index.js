@@ -1,9 +1,10 @@
+import {createCatalogMaintenance} from './services/catalog-maintenance.server.js';
 import "dotenv/config";
 import { fileURLToPath } from "node:url";
 import shopify from "./shopify.js";
 import { createApp } from "./app.js";
 import { redis, connectRedis, closeRedis } from "./db/redis.js";
-import { connectDatabase, closeDatabase, database } from "./db/postgres.js";
+import { connectDatabase, closeDatabase, database,tenantReadPool,catalogWorkerDatabase } from "./db/postgres.js";
 import { createInstalledFilterHttpRuntime } from "./services/filter-engine.server.js";
 import { createReconciliationService } from "./mirror/index.js";
 import { createCatalogImportService } from "./services/catalog-import.server.js";
@@ -53,17 +54,17 @@ if (database) {
   }
 }
 
-const reconciliationService = database
-  ? createReconciliationService({ database })
+const reconciliationService = catalogWorkerDatabase
+  ? createReconciliationService({ database:catalogWorkerDatabase })
   : null;
-const catalogPhaseRuntime = database
+const catalogPhaseRuntime = catalogWorkerDatabase
   ? await createCatalogPhaseRuntime({
-      database,
+      database:catalogWorkerDatabase,
       shopify,
       redis: redis.isOpen ? redis : undefined,
     })
   : null;
-const catalogImportService = database ? createCatalogImportService({ database, shopify, phaseRuntime: catalogPhaseRuntime }) : null;
+const catalogImportService = catalogWorkerDatabase ? createCatalogImportService({ database:catalogWorkerDatabase, shopify, phaseRuntime: catalogPhaseRuntime }) : null;
 const exportConfig=exportProductionConfig();
 const exportRuntime=exportConfig?await createExportRuntime({database,sessionStorage:shopify.config.sessionStorage,
   cursorSecret:process.env.FILTER_CURSOR_SECRET||process.env.SHOPIFY_API_SECRET,config:exportConfig}):null;
@@ -74,11 +75,16 @@ if (catalogImportService) {
   catalogImportService.start();
 }
 
+const catalogMaintenance=catalogWorkerDatabase?createCatalogMaintenance({database:catalogWorkerDatabase}):null;
+await catalogMaintenance?.verifyStorage();
+
 const server = createApp({
   shopify,
   staticPath,
   filterRuntime,
   database,
+  lifecycleDatabase:catalogWorkerDatabase,
+  tenantReadPool,
   reconciliationService,
   catalogImportService,
   exportRuntime,
@@ -87,6 +93,7 @@ const server = createApp({
   port,
   () => console.log(`Shopify Express app listening on port ${port}`),
 );
+catalogMaintenance?.start();
 const operationSupervisor = database ? createOperationSupervisor({ database, logger: console }) : null;
 exportRuntime?.start();
 historySecurityRuntime?.start();
@@ -98,6 +105,7 @@ for (const signal of ["SIGINT", "SIGTERM"])
       await exportRuntime?.stop();
       await historySecurityRuntime?.stop();
       await operationSupervisor?.stop();
+      await catalogMaintenance?.stop();
       await Promise.all([closeRedis(), closeDatabase()]);
       process.exit(0);
     });

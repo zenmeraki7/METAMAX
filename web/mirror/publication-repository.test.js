@@ -26,7 +26,7 @@ function fixture(rows = [row("products"), row("variants")], failure = null) {
 
 test("publication reads bind tenant/generation/datasets and protect the first SELECT", async () => {
   const f = fixture(), snapshot = await f.repository.getPublishedSnapshot(request);
-  const query = f.calls.find(call => call.values);
+  const query = f.calls.find(call => call.values?.length === 3);
   assert.deepEqual(query.values, [shopId, generationId, ["products", "variants"]]);
   assert.ok(f.calls.findIndex(call => call.text.startsWith("LOCK TABLE")) < f.calls.indexOf(query));
   assert.equal(f.calls.at(-1).text, "COMMIT");

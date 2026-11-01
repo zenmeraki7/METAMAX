@@ -48,6 +48,7 @@ export {
 } from "./constraints.js";
 
 // Authorized field service
+export {FIELD_CAPABILITY_CONTRACT_VERSION,FIELD_CAPABILITY_VERSIONS,getFieldCapability} from './capabilities.js';
 export {
   FIELD_ACCESS,
   FIELD_ORIGINS,

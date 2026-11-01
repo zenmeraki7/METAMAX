@@ -127,7 +127,11 @@ BEGIN
   (o.operation_state IN('COMPLETED','PARTIAL','FAILED','CANCELLED') AND
    COALESCE(o.retained_until,o.created_at+interval '30 days')<=clock_timestamp() AND NOT EXISTS(
     SELECT 1 FROM mirror.job_commands c WHERE c.shop_id=o.shop_id AND c.id=o.execution_job_id AND c.status='RUNNING'
-     AND c.lease_until>clock_timestamp() AND c.cancel_requested_at IS NULL)))
+     AND c.lease_until>clock_timestamp() AND c.cancel_requested_at IS NULL)
+   AND NOT EXISTS(SELECT 1 FROM edit_history.undo_requests u WHERE u.shop_id=o.shop_id AND u.installation_id=o.installation_id
+    AND u.original_operation_id=o.id AND(u.undo_state IN('SUBMITTING','OUTCOME_UNKNOWN','EXECUTING','VERIFYING') OR
+     (u.undo_state='APPROVED' AND EXISTS(SELECT 1 FROM mirror.execution_contracts a WHERE a.shop_id=u.shop_id
+      AND a.id=u.execution_contract_id AND a.status='APPROVED' AND a.expires_at>clock_timestamp()))))))
  ORDER BY o.created_at,o.id FOR UPDATE OF o SKIP LOCKED LIMIT 1;
  IF NOT FOUND THEN
   WITH due AS(SELECT shop_id,installation_id FROM edit_history.privacy_scopes WHERE completed_at IS NULL
@@ -235,6 +239,7 @@ GRANT SELECT ON edit_history.operations,edit_history.changes,edit_history.snapsh
 GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA edit_history TO metamax_history_owner;
 GRANT USAGE ON SCHEMA mirror TO metamax_history_owner;
 GRANT SELECT ON mirror.shops,mirror.job_commands TO metamax_history_owner;
+GRANT SELECT(shop_id,id,status,expires_at) ON mirror.execution_contracts TO metamax_history_owner;
 GRANT UPDATE(cancel_requested_at,fence,lease_until) ON mirror.job_commands TO metamax_history_owner;
 -- PostgreSQL row locks require UPDATE permission on at least one column. Give
 -- history an inert lock carrier, never permission to change engine claims,

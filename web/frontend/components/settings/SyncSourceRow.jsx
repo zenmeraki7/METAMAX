@@ -19,6 +19,7 @@ export default function SyncSourceRow({
 }) {
   const Icon = sourceIcons[source.icon] ?? "product";
   const automatic = source.syncType === "automatic";
+  const unavailable = source.status === "unavailable";
   const failed = source.status === "failed";
   const running = ["queued", "running"].includes(source.status);
   return (
@@ -45,15 +46,16 @@ export default function SyncSourceRow({
 
       <s-table-cell>
         <s-badge
-          tone={automatic ? "success" : "info"}
+          tone={unavailable ? "neutral" : automatic ? "success" : "info"}
           icon={automatic ? "refresh" : "clock"}
         >
-          {automatic ? "Automatic" : "Periodic"}
+          {unavailable ? "Unavailable" : automatic ? "Automatic" : "Periodic"}
         </s-badge>
 
         {failed && <s-badge tone="critical">Failed</s-badge>}
 
         {running && <s-badge tone="info">Syncing</s-badge>}
+        {source.status === "cancelled" && <s-badge tone="warning">Cancelled</s-badge>}
       </s-table-cell>
 
       <s-table-cell class="sd-source-time">
@@ -66,7 +68,7 @@ export default function SyncSourceRow({
         <s-button
           variant="tertiary"
           onClick={() => onRefresh(source.id)}
-          disabled={disabled || busy}
+          disabled={disabled || busy || source.supported === false}
           loading={busy}
           accessibilityLabel={`Refresh ${source.name}`}
         >

@@ -20,6 +20,7 @@ const operation = (
   startedLabel,
   duration,
   user,
+  isDemo: true,
 });
 
 export const demoHistory = [
@@ -209,17 +210,7 @@ export const demoHistory = [
   ),
 ];
 
-export const HISTORY_STATUS_OPTIONS = Object.freeze([
-  "All",
-  "Running",
-  "Queued",
-  "Pending",
-  "Retrying",
-  "Completed",
-  "Cancelled",
-  "Failed",
-  "Expired",
-]);
+export {HISTORY_STATUS_OPTIONS} from '../../shared/history-operation-contract.js';
 
 export const HISTORY_TYPE_OPTIONS = Object.freeze([
   "All",

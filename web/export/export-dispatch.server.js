@@ -44,7 +44,7 @@ export function createExportQueueEvidence({database,queue,generationProtection}=
       const client=await database.connect();
       try {
         await client.query("BEGIN");await client.query("SET LOCAL statement_timeout='10000ms'");
-        await client.query("LOCK TABLE mirror.publications IN ACCESS EXCLUSIVE MODE");
+        await client.query("LOCK TABLE mirror.publications IN ACCESS SHARE MODE");
         const job=(await client.query(`SELECT j.* FROM export_engine.jobs j JOIN export_engine.outbox o ON o.job_id=j.id
           WHERE o.id=$1 AND o.delivery_key=$2 AND j.state='QUEUED' AND NOT j.cancel_requested
             AND j.lease_token IS NULL AND NOT EXISTS(SELECT 1 FROM export_engine.artifacts a WHERE a.job_id=j.id)

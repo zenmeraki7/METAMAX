@@ -1,3 +1,4 @@
+import {loadMigrationEnvironment} from '../security/migration-environment.server.js';
 /** Explicitly scoped deployment: actual V1, then empty-history V2 upgrade only.
  * Recovery dump/config stay in an ignored local audit directory. No credentials
  * are written to files, passed on command lines or printed in logs.
@@ -16,7 +17,7 @@ const web = fileURLToPath(new URL('../', import.meta.url));
 const root = fileURLToPath(new URL('../../.audit/history-deploy-20261030/', import.meta.url));
 const targetNames = ['20261030110000_edit_history_v1','20261030120000_edit_history_v2_upgrade'];
 const envBytes = await readFile(new URL('../.env', import.meta.url));
-const local = dotenv.parse(envBytes);
+const local = loadMigrationEnvironment();
 const live = new URL(process.env.DIRECT_DATABASE_URL || local.DIRECT_DATABASE_URL || '');
 if (live.hostname !== 'ep-odd-surf-aoil4uxa.c-2.ap-southeast-1.aws.neon.tech' || live.pathname !== '/newmeta_app') throw Error('Configured migration target changed');
 live.searchParams.set('schema','mirror');

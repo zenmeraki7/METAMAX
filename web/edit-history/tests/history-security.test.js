@@ -41,8 +41,19 @@ test('rotated keyrings retain old decryption keys and reject malformed secret ma
  const second=historyValueKeyring({activeKeyId:'new',keysJson:JSON.stringify({old:oldKey,new:newKey})});
  assert.equal((await second.valueProtection.open({...r,...sealed},{tenant})).value_json,'private');
  assert.equal((await second.valueProtection.seal(r,'private',{tenant})).encryption_key_reference,'new');
+ const missingOld=historyValueKeyring({activeKeyId:'new',keysJson:JSON.stringify({new:newKey})});
+ await assert.rejects(()=>missingOld.valueProtection.open({...r,...sealed},{tenant}),/key unavailable/);
+ missingOld.close();
  first.close();second.close();
+ await assert.rejects(()=>second.valueProtection.seal(r,'private',{tenant}),/key unavailable/);
  assert.throws(()=>historyValueKeyring({activeKeyId:'x',keysJson:'private broken secret'}),error=>!error.message.includes('private broken secret'));
+});
+
+test('keyring rejects missing active keys and noncanonical or wrong-length key material',()=>{
+ const key=Buffer.alloc(32,1).toString('base64');
+ for(const keys of [{other:key},{key:key+'\n'},{key:Buffer.alloc(31,1).toString('base64')},{key:'not-a-key'}]){
+  assert.throws(()=>historyValueKeyring({activeKeyId:'key',keysJson:JSON.stringify(keys)}),error=>!error.message.includes(key));
+ }
 });
 test('maintenance remains disabled without explicit configuration and rejects missing dedicated credentials',async()=>{
  assert.equal(await createHistorySecurityRuntime({env:{}}),null);

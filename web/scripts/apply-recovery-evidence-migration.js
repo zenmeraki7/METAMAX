@@ -1,3 +1,4 @@
+import {loadMigrationEnvironment} from '../security/migration-environment.server.js';
 // Complete the reviewed pending migration needed by the installed runtime.
 import {readFile,writeFile,readdir} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
@@ -9,7 +10,7 @@ import {createCatalogPhaseRuntime} from '../services/catalog-phase-runtime.serve
 const mode=process.argv[2];
 if(!['--scratch-only','--live'].includes(mode))throw Error('Explicit --scratch-only or --live mode required');
 const bytes=await readFile(new URL('../.env',import.meta.url));
-const env=dotenv.parse(bytes),live=new URL(env.DIRECT_DATABASE_URL);
+const env=loadMigrationEnvironment(),live=new URL(env.DIRECT_DATABASE_URL);
 if(live.hostname!=='ep-odd-surf-aoil4uxa.c-2.ap-southeast-1.aws.neon.tech'||live.pathname!=='/newmeta_app')throw Error('Live target changed');
 const stage=new URL(live);stage.hostname='ep-falling-pond-aofxlzmy.c-2.ap-southeast-1.aws.neon.tech';stage.pathname='/dispatch_validation_20261029';
 const expected='20261029000600_sync_dispatch_recovery_evidence';

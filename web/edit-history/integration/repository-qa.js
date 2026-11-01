@@ -4,6 +4,8 @@ import { createHistoryRepository } from '../history-repository.server.js';
 import { createHistoryExecutionAdapter } from '../../services/history-execution-adapter.server.js';
 import { getApprovedContractInTransaction } from '../../services/approval.server.js';
 import { normalizeHistorySnapshot,historyFingerprint } from '../history-contract.js';
+import {createHistoryExecution} from '../history-execution.server.js';
+import {createOperationRecoveryScanner} from '../../workers/operation-recovery-scanner.server.js';
 const base=f=>({authContext:f.input.authContext,operationId:f.input.operationId,mutationId:f.input.mutationId,attemptId:f.plan.attemptId});
 export async function evidence(f,kind,override={}){
  const evidenceId=randomUUID();
@@ -20,6 +22,47 @@ export async function evidence(f,kind,override={}){
  await f.q('INSERT INTO history_test_authority.evidence VALUES($1,$2,$3,$4,true)',[f.shopId,f.installationId,evidenceId,JSON.stringify(record)]);return evidenceId;
 }
 export async function testRepositoryQa(t,fixture,pool){
+ await t.test('approval expiry after admission prevents consumption but does not erase no-write evidence',async()=>{
+  const f=await fixture({approvalLifetimeMs:2000});await f.repository.prepareRequest(f.input);const dispatch=await f.repository.beginDispatch(f.input);
+  await new Promise(resolve=>setTimeout(resolve,2100));
+  await assert.rejects(()=>f.repository.consumeDispatch({...base(f),claim:f.input.claim,dispatchToken:dispatch.dispatchToken,dispatchHandoffKey:dispatch.dispatchHandoffKey}),{code:'HISTORY_OWNERSHIP_LOST'});
+  await f.repository.recordVerifiedNoWrite({...base(f),claim:f.input.claim,dispatchToken:dispatch.dispatchToken,dispatchHandoffKey:dispatch.dispatchHandoffKey,evidenceId:await evidence(f,'AUTHORITATIVE_NO_WRITE')});
+  assert.equal((await f.repository.getRequest(base(f))).requestState,'FAILED_NO_WRITE');
+ });
+ await t.test('command finalization reads the complete job independently of a last-item request',async()=>{
+  const f=await fixture();await f.repository.prepareRequest(f.input);
+  await f.repository.recordVerifiedNoWrite({...base(f),claim:f.input.claim,evidenceId:await evidence(f,'AUTHORITATIVE_NO_WRITE')});
+  await f.q("UPDATE mirror.job_items SET status='FAILED' WHERE shop_id=$1 AND command_id=$2",[f.shopId,f.command]);
+  await f.q("UPDATE mirror.job_commands SET status='FAILED',lease_token=NULL,lease_until=NULL WHERE shop_id=$1 AND id=$2",[f.shopId,f.command]);
+  const result=await f.repository.finalizeExecutionJob({authContext:f.input.authContext,executionJobId:f.command,expectedTenant:{shopId:f.shopId,installationId:f.installationId}});
+  assert.equal(result.completed,true);assert.equal(result.state,'FAILED');
+  assert.equal((await f.q('SELECT operation_state FROM edit_history.operations WHERE shop_id=$1 AND execution_job_id=$2',[f.shopId,f.command])).rows[0].operation_state,'FAILED');
+ });
+ await t.test('complete persisted multi-field evidence is verified on the worker transaction',async()=>{
+  const f=await fixture();await f.repository.prepareRequest(f.input);const dispatch=await f.repository.beginDispatch(f.input);
+  await f.repository.consumeDispatch({...base(f),claim:f.input.claim,dispatchToken:dispatch.dispatchToken,dispatchHandoffKey:dispatch.dispatchHandoffKey});
+  await f.repository.recordMutationOutcome({...base(f),claim:f.input.claim,evidenceId:await evidence(f,'SHOPIFY_ACKNOWLEDGEMENT')});
+  await f.repository.recordVerification({...base(f),claim:f.input.claim,evidenceId:await evidence(f,'VERIFIED_OBSERVATION')});
+  const tx=await pool.operationWorker.connect();
+  try{
+   await tx.query('BEGIN');await tx.query("SELECT set_config('app.shop_id',$1,true)",[f.shopId]);
+   const args={tx,authContext:f.input.authContext,operationId:f.input.operationId,mutationId:f.input.mutationId,
+    claim:{shop_id:f.shopId,installation_version:f.installationId,id:f.command,fence:f.input.claim.fenceEpoch,lease_token:f.input.claim.leaseToken},
+    item:{id:f.item,resource_id:f.input.entries[0].intent.identity.resourceGid},approved:f.plan.itemIntendedValues};
+   assert.equal(await f.repository.verifyItemCompletion(args),true);
+   await assert.rejects(()=>f.repository.verifyItemCompletion({...args,approved:{title:args.approved.title}}),{code:'HISTORY_VERIFICATION_INCOMPLETE'});
+   await tx.query('ROLLBACK');
+  }finally{tx.release();}
+ });
+ await t.test('dispatch guard runs inside admission and revocation rolls back authorization',async()=>{
+  const f=await fixture();await f.repository.prepareRequest(f.input);
+  let calls=0;
+  await assert.rejects(()=>f.repository.beginDispatch(f.input,{dispatchGuard:async tx=>{
+   calls++;const row=(await tx.query('SELECT txid_current()::text AS transaction_id')).rows[0];assert.ok(row.transaction_id);
+   throw Object.assign(Error('Current write permission revoked'),{code:'HISTORY_UNAUTHORIZED'});
+  }}),{code:'HISTORY_UNAUTHORIZED'});
+  assert.equal(calls,1);assert.equal((await f.repository.getRequest(base(f))).requestState,'PREPARED');
+ });
  await t.test('authority adapter verifies exact columns and FK joins; schema drift is rejected',async()=>{
   const tx=await pool.adminConnect(),adapter=createHistoryExecutionAdapter();
   try{
@@ -34,9 +77,16 @@ export async function testRepositoryQa(t,fixture,pool){
   const f=await fixture(),tx=await pool.connect();let selects=0;
   try{await tx.query('BEGIN');const before=(await tx.query('SELECT txid_current()::text AS id')).rows[0].id;
    const approval=await getApprovedContractInTransaction({client:{query(sql,values){selects++;return tx.query(sql,values);}},shopId:f.shopId,contractId:f.contractId});
-   assert.equal(approval.id,f.contractId);assert.equal(selects,1);assert.equal((await tx.query('SELECT txid_current()::text AS id')).rows[0].id,before);
+   assert.equal(approval.id,f.contractId);assert.equal(selects,2);assert.equal((await tx.query('SELECT txid_current()::text AS id')).rows[0].id,before);
    await assert.rejects(()=>getApprovedContractInTransaction({shopId:f.shopId,contractId:f.contractId}),TypeError);
   }finally{await tx.query('ROLLBACK');tx.release();}
+ });
+ await t.test('installation replacement invalidates even an intact hashed approval',async()=>{
+  const f=await fixture();
+  const approved=await getApprovedContractInTransaction({client:{query:f.q},shopId:f.shopId,contractId:f.contractId});
+  assert.equal(approved.contract.executionCoordinates.installationVersion,f.installationId);
+  await f.q('UPDATE mirror.shops SET installation_version=$2 WHERE id=$1',[f.shopId,randomUUID()]);
+  await assert.rejects(()=>getApprovedContractInTransaction({client:{query:f.q},shopId:f.shopId,contractId:f.contractId}),{code:'FIELD_CONTRACT_MISMATCH'});
  });
  await t.test('journal admission grants cannot authorize dispatch or consume a dispatch capability',async()=>{
   const f=await fixture();await f.repository.prepareRequest(f.input);f.state.dispatchAllowed=false;
@@ -79,6 +129,19 @@ export async function testRepositoryQa(t,fixture,pool){
   assert.equal((await f.q("SELECT count(*) FROM edit_history.recovery_tasks WHERE shop_id=$1 AND task_state='COMPLETED'",[f.shopId])).rows[0].count,'2');
   await assert.rejects(()=>f.repository.beginDispatch(f.input));
  });
+ await t.test('independent scanner finds a consumed dispatch even when the worker wrote no recovery task',async()=>{
+  const f=await fixture();await f.repository.prepareRequest(f.input);const dispatch=await f.repository.beginDispatch(f.input);
+  await f.repository.consumeDispatch({...base(f),claim:f.input.claim,dispatchToken:dispatch.dispatchToken,dispatchHandoffKey:dispatch.dispatchHandoffKey});
+  assert.equal((await f.q('SELECT count(*) FROM edit_history.recovery_tasks WHERE shop_id=$1',[f.shopId])).rows[0].count,'0');
+  await f.q("UPDATE mirror.job_commands SET lease_until=clock_timestamp()-interval '1 second' WHERE shop_id=$1 AND id=$2",[f.shopId,f.command]);
+  await assert.rejects(()=>f.repository.discoverOutcomeRecovery({authContext:f.input.authContext,expectedTenant:{shopId:'other.myshopify.com',installationId:f.installationId}}),{code:'HISTORY_UNAUTHORIZED'});
+  const historyExecution=createHistoryExecution({historyRepository:f.repository,resolveRecoveryAuth:async()=>f.input.authContext,
+   loadExecutionRequest:async()=>assert.fail('No old worker needed'),persistEvidence:async()=>assert.fail('No original-worker persistence needed')});
+  const scanner=createOperationRecoveryScanner({database:{connect:()=>pool.adminConnect()},historyExecution,logger:{error(){}}});
+  assert.equal((await scanner.runOne({workerId:'independent-scanner',shopId:f.shopId,commandId:f.command})).kind,'RECOVERY_SCHEDULED');
+  assert.equal((await f.q('SELECT count(*) FROM edit_history.recovery_tasks WHERE shop_id=$1',[f.shopId])).rows[0].count,String(f.input.entries.length));
+  assert.equal((await f.q("SELECT checkpoint->'recoveryScan'->>'state' AS state FROM mirror.job_commands WHERE shop_id=$1 AND id=$2",[f.shopId,f.command])).rows[0].state,'SCHEDULED');
+ });
  await t.test('recovery takeover fences stale owners; bounded retry preserves uncertainty and ends in review',async()=>{
   const f=await fixture();await f.repository.prepareRequest(f.input);await f.repository.beginDispatch(f.input);
   await f.q("UPDATE mirror.job_commands SET lease_until=clock_timestamp()-interval '1 second' WHERE shop_id=$1 AND id=$2",[f.shopId,f.command]);
@@ -100,7 +163,7 @@ export async function testRepositoryQa(t,fixture,pool){
    const f=await fixture();await f.repository.prepareRequest(f.input);
    if(kind==='CONFLICT_OBSERVATION'){await f.repository.beginDispatch(f.input);const ack=await evidence(f,'SHOPIFY_ACKNOWLEDGEMENT');await f.repository.recordMutationOutcome({...base(f),claim:f.input.claim,evidenceId:ack});}
    const id=await evidence(f,kind),input={...base(f),claim:f.input.claim,evidenceId:id};
-   const result=kind==='CONFLICT_OBSERVATION'?await f.repository.recordVerification(input):await f.repository.recordMutationOutcome(input);
+   const result=kind==='CONFLICT_OBSERVATION'?await f.repository.recordVerification(input):await f.repository.recordVerifiedNoWrite(input);
    assert.equal(result.state,kind==='CONFLICT_OBSERVATION'?'CONFLICT':'FAILED_NO_WRITE');
    assert.equal((await f.q('SELECT changes_failed FROM edit_history.operations WHERE shop_id=$1',[f.shopId])).rows[0].changes_failed,'2');
   }

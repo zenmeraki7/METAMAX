@@ -46,7 +46,7 @@ export default function SyncSourcesTable({
               disabled={anyRefreshing}
               loading={refreshingAll}
             >
-              {refreshingAll ? "Requesting..." : "Refresh all"}
+              {refreshingAll ? "Requesting..." : "Refresh catalog mirror"}
             </s-button>
           </s-grid>
         </s-stack>

@@ -1,6 +1,15 @@
 BEGIN;
 SET LOCAL lock_timeout='5s';
 SET LOCAL statement_timeout='30s';
+ALTER TABLE edit_history.undo_requests ADD COLUMN resource_gid text
+ CHECK(resource_gid IS NULL OR resource_gid ~ '^gid://shopify/Product/[1-9][0-9]*$');
+CREATE FUNCTION edit_history.guard_undo_resource() RETURNS trigger LANGUAGE plpgsql
+ SET search_path=pg_catalog,edit_history,pg_temp AS $$ BEGIN
+ IF NEW.resource_gid IS DISTINCT FROM OLD.resource_gid THEN RAISE EXCEPTION 'Undo target is immutable' USING ERRCODE='55000'; END IF;
+ RETURN NEW; END $$;
+ALTER FUNCTION edit_history.guard_undo_resource() OWNER TO metamax_history_owner;
+REVOKE ALL ON FUNCTION edit_history.guard_undo_resource() FROM PUBLIC;
+CREATE TRIGGER eh_undo_resource_guard BEFORE UPDATE ON edit_history.undo_requests FOR EACH ROW EXECUTE FUNCTION edit_history.guard_undo_resource();
 -- AFTER observations come from Shopify while retaining the execution's pinned
 -- Field/Filter coordinates. BEFORE provenance remains strict.
 ALTER TABLE edit_history.snapshots DROP CONSTRAINT eh_snapshot_binding;
@@ -44,8 +53,8 @@ CREATE INDEX eh_verified_execution_item_idx ON edit_history.mutation_requests(sh
 CREATE INDEX eh_unresolved_execution_idx ON edit_history.mutation_requests(shop_id,installation_id,operation_id)
  WHERE request_state IN('DISPATCH_AUTHORIZED','ACKNOWLEDGED','OUTCOME_UNKNOWN');
 GRANT SELECT ON edit_history.undo_requests TO metamax_history_runtime;
-GRANT INSERT(id,shop_id,installation_id,original_operation_id,idempotency_key,request_fingerprint,conflict_policy,handoff_key)
+GRANT INSERT(id,shop_id,installation_id,original_operation_id,idempotency_key,request_fingerprint,conflict_policy,handoff_key,resource_gid)
  ON edit_history.undo_requests TO metamax_history_runtime;
 GRANT UPDATE(undo_state,preflight_fingerprint,inverse_plan_fingerprint,approval_reference,approved_at,execution_job_id,
- execution_contract_id,updated_at,completed_at,failure_code) ON edit_history.undo_requests TO metamax_history_runtime;
+ execution_contract_id,updated_at,completed_at,failure_code,retry_count,next_attempt_at) ON edit_history.undo_requests TO metamax_history_runtime;
 COMMIT;

@@ -156,6 +156,8 @@ function createTransactionAdapter({ tx, sql, maxAttempts, normalize, validators 
     now: async () => (await rows("SELECT clock_timestamp() AS now"))[0].now,
     async lockShop(shopId) {
       shop(shopId);
+      await tx.$queryRawUnsafe("SELECT set_config('app.shop_id',$1,true)",shopId);
+      await tx.$queryRawUnsafe("SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1::text,581834147::bigint))",shopId);
       if (lockedShop && lockedShop !== shopId) fail("LOCK_ORDER", "One shop authority per transaction");
       lockedShop = null; lockedRun = null; invalidateEvidence();
       const result = await rows(`SELECT ${shopColumn} FROM ${shopTable} WHERE ${shopColumn}=$1 FOR UPDATE`, shopId);

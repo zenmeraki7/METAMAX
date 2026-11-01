@@ -1,9 +1,13 @@
-import test from "node:test";
+import test,{mock} from "node:test";
 import assert from "node:assert/strict";
-import { createFieldService } from "../../fields/resolve.js";
-import { createFilterService } from "../../filters/validate.js";
+// Isolated future money-writer adapter; installed product writer is tested separately.
+const capability=mock.module('../../fields/write-capabilities.js',{namedExports:{WRITE_CAPABILITY_VERSION:'fixture-money-v1',requireInstalledWriteCapability(){}}});
+const {createFieldService}=await import('../../fields/resolve.js');
+
+const {createFilterService}=await import('../../filters/validate.js');
 import { fingerprintFilterAst } from "../../filters/fingerprint.js";
-import { createHistorySnapshotService } from "../snapshot-service.server.js";
+const {createHistorySnapshotService}=await import('../snapshot-service.server.js');
+capability.restore();
 import { CANONICAL_REGISTRY_INFO } from "../../fields/canonical.js";
 
 async function fixture() {

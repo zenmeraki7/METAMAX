@@ -1,15 +1,14 @@
 import { useState } from "react";
 import { productColumns } from "../../data/products.columns.js";
 import {
-  installedFilterFields as fields,
+  installedFilterFields as installedFields,
   filterOperators,
   isPresenceOperator,
   filterOperand,
   getFieldLabel,
   getFieldType,
-  isDynamicMetafieldId,
 } from "../../data/products.filters.js";
-const statuses = ["All", "Active", "Draft", "Archived", "Unlisted"];
+
 export default function ProductsToolbar({
   search,
   setSearch,
@@ -25,22 +24,54 @@ export default function ProductsToolbar({
   allVisibleSelected = false,
   setAllVisibleSelected,
   hasProducts = false,
-  tagsVerified = typeof IS_REACT_ACT_ENVIRONMENT !== "undefined"
-    ? Boolean(IS_REACT_ACT_ENVIRONMENT)
-    : (typeof window !== "undefined" && Boolean(window.__TAGS_VERIFIED__)),
+  capabilities = [],
 }) {
+  const statuses=['All',...(capabilities.find(item=>item.id==='product.status')?.enumValues??[]).map(value=>value[0]+value.slice(1).toLowerCase())];
   const [field, setField] = useState("product.title");
   const [operator, setOperator] = useState("contains");
   const [value, setValue] = useState("");
   const [choosingField, setChoosingField] = useState(true);
   const [fieldSearch, setFieldSearch] = useState("");
+  const [filterError, setFilterError] = useState(null);
+  const mixedEntities = items => new Set(items.map(item => item.field.split(".")[0])).size > 1;
+  const mixedMessage = 'Use Match all when combining product and variant filters.';
+  const availableOperators=(id,type)=>(filterOperators[type]??[]).filter(([operator])=>capabilities.find(item=>item.id===id)?.operators.includes(operator));
+  const fields=installedFields.filter(([id,,type])=>availableOperators(id,type).length>0);
   const isTag = field === "product.tags";
-  const fieldType = getFieldType(field);
-  const operators = filterOperators[fieldType] ?? filterOperators.text;
+  const fieldType = capabilities.find(item=>item.id===field)?.type ?? getFieldType(field);
+  const enumValues =
+    capabilities.find((item) => item.id === field)?.enumValues ?? null;
+  const isEnum = Boolean(enumValues && enumValues.length);
+  const operators = availableOperators(field,fieldType);
   const requiresValue = !isPresenceOperator(operator);
+  const effectiveValue =
+    fieldType === "boolean" && !["in", "not_in"].includes(operator)
+      ? (value || "true")
+      : isEnum && !["in", "not_in"].includes(operator)
+        ? (value || enumValues[0])
+        : value;
+  let operandError=null;
+  if(requiresValue && effectiveValue.trim())try{filterOperand(fieldType,operator,effectiveValue,field);}catch(error){operandError=error.message;}
   const addFilter = () => {
     const effectiveOperator = operator === "ne" ? "neq" : operator;
-    if ((requiresValue && !value.trim()) || conditions.length >= 10) return;
+    const filterVal =
+      fieldType === "boolean" && !["in", "not_in"].includes(effectiveOperator)
+        ? (value || "true")
+        : isEnum && !["in", "not_in"].includes(effectiveOperator)
+          ? (value || enumValues[0])
+          : value;
+    if (
+      operandError ||
+      !operators.some(([id]) => id === effectiveOperator) ||
+      (requiresValue && !filterVal.trim()) ||
+      conditions.length >= 10
+    )
+      return;
+    if (match === "any" && mixedEntities([...conditions, {field}])) {
+      setFilterError(mixedMessage);
+      return;
+    }
+    setFilterError(null);
     setAdvancedFilters(
       [
         ...conditions,
@@ -48,7 +79,7 @@ export default function ProductsToolbar({
           field,
           operator: effectiveOperator,
           ...(requiresValue
-            ? { value: filterOperand(fieldType, effectiveOperator, value) }
+            ? { value: filterOperand(fieldType, effectiveOperator, filterVal,field) }
             : {}),
         },
       ],
@@ -100,7 +131,7 @@ export default function ProductsToolbar({
             <s-button
               icon="plus"
               commandFor="product-filters"
-              disabled={conditions.length >= 10}
+              disabled={conditions.length >= 10 || !fields.length}
               onClick={() => {
                 setChoosingField(true);
                 setFieldSearch("");
@@ -157,15 +188,23 @@ export default function ProductsToolbar({
               label="Match filters"
               labelAccessibilityVisibility="exclusive"
               value={match}
-              onChange={(event) =>
-                setAdvancedFilters(conditions, event.currentTarget.value)
-              }
+              onChange={(event) => {
+                const next = event.currentTarget.value;
+                if (next === "any" && mixedEntities(conditions)) {
+                  event.currentTarget.value = match;
+                  setFilterError(mixedMessage);
+                  return;
+                }
+                setFilterError(null);
+                setAdvancedFilters(conditions, next);
+              }}
             >
               <s-option value="all">Match all filters</s-option>
-              <s-option value="any">Match any filters</s-option>
+              <s-option value="any" disabled={mixedEntities(conditions)}>Match any filters</s-option>
             </s-select>
           </div>
         </div>
+        {(filterError || mixedEntities(conditions)) && <s-text>{filterError || mixedMessage}</s-text>}
         {conditions.length > 0 && (
           <s-text color="subdued">
             Search and product status apply to every result.
@@ -196,7 +235,6 @@ export default function ProductsToolbar({
                   <div className="products-field-list">
                     {fields
                       .filter(([id, label]) => {
-                        if (id === "product.tags" && !tagsVerified) return false;
                         return label
                           .toLowerCase()
                           .includes(fieldSearch.trim().toLowerCase());
@@ -208,34 +246,19 @@ export default function ProductsToolbar({
                           key={id}
                           onClick={() => {
                             setField(id);
-                            setOperator(filterOperators[type][0][0]);
-                            setValue(type === "boolean" ? "true" : "");
+                            setOperator(availableOperators(id,type)[0][0]);
+                            setValue(type === "boolean" ? "true" : id === "variant.inventoryPolicy" ? "DENY" : id === "product.status" ? "ACTIVE" : "");
                             setChoosingField(false);
                           }}
                         >
                           {label}
                         </s-button>
                       ))}
-                    {isDynamicMetafieldId(fieldSearch.trim()) && (
-                      <s-button
-                        className="products-field-option"
-                        variant="secondary"
-                        onClick={() => {
-                          setField(fieldSearch.trim());
-                          setOperator("contains");
-                          setValue("");
-                          setChoosingField(false);
-                        }}
-                      >
-                        Add metafield: {fieldSearch.trim()}
-                      </s-button>
-                    )}
                     {!fields.some(([id, label]) => {
-                      if (id === "product.tags" && !tagsVerified) return false;
                       return label
                         .toLowerCase()
                         .includes(fieldSearch.trim().toLowerCase());
-                    }) && !isDynamicMetafieldId(fieldSearch.trim()) && <s-text color="subdued">No matching fields</s-text>}
+                    }) && <s-text color="subdued">No matching fields</s-text>}
                   </div>
                 </>
               ) : (
@@ -269,13 +292,27 @@ export default function ProductsToolbar({
                     (fieldType === "boolean" && !["in", "not_in"].includes(operator) ? (
                       <s-select
                         label="Value"
-                        value={value}
+                        value={value || "true"}
                         onChange={(event) =>
                           setValue(event.currentTarget.value)
                         }
                       >
                         <s-option value="true">True</s-option>
                         <s-option value="false">False</s-option>
+                      </s-select>
+                    ) : isEnum && !["in", "not_in"].includes(operator) ? (
+                      <s-select
+                        label="Value"
+                        value={value || enumValues[0]}
+                        onChange={(event) =>
+                          setValue(event.currentTarget.value)
+                        }
+                      >
+                        {enumValues.map((val) => (
+                          <s-option key={val} value={val}>
+                            {val.charAt(0).toUpperCase() + val.slice(1).toLowerCase()}
+                          </s-option>
+                        ))}
                       </s-select>
                     ) : (
                       <s-text-field
@@ -292,10 +329,12 @@ export default function ProductsToolbar({
                         }
                       />
                     ))}
+                  {operandError && <s-banner tone="critical">{operandError}</s-banner>}
                   <s-button
                     variant="primary"
                     disabled={
-                      (requiresValue && !value.trim()) ||
+                      Boolean(operandError) || !operators.some(([id])=>id===operator) ||
+                      (requiresValue && !effectiveValue.trim()) ||
                       conditions.length >= 10
                     }
                     commandFor="product-filters"

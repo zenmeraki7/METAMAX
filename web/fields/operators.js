@@ -834,6 +834,27 @@ function isValidOperandPrimitive(value) {
 }
 
 /**
+ * Validates a plain structured field reference operand:
+ * { "kind": "field", "field": "<fieldId>" }
+ *
+ * Rejects extra keys, accessors, non-plain objects, or invalid field types.
+ */
+export function isStructuredFieldReference(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const proto = Object.getPrototypeOf(value);
+  if (proto !== Object.prototype && proto !== null) {
+    return false;
+  }
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== 2 || !keys.includes("kind") || !keys.includes("field")) {
+    return false;
+  }
+  return value.kind === "field" && typeof value.field === "string" && value.field.length > 0;
+}
+
+/**
  * Dense, ordinary arrays only.
  *
  * Requires:
@@ -923,7 +944,7 @@ function validateOperandShape(
     case S.ELEMENT:
       return (
         hasValue === true &&
-        isValidOperandPrimitive(value)
+        (isValidOperandPrimitive(value) || isStructuredFieldReference(value))
       );
 
     case S.PAIR:

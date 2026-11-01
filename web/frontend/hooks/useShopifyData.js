@@ -7,7 +7,7 @@ import {
   requestShopifyRefresh,
 } from "../services/shopifyData.api.js";
 
-const DEMO_MODE = import.meta.env.VITE_SYNC_DEMO_MODE !== "false";
+const DEMO_MODE = import.meta.env.VITE_SYNC_DEMO_MODE === "true";
 
 export default function useShopifyData(notify) {
   const [overview, setOverview] = useState(
@@ -55,6 +55,7 @@ export default function useShopifyData(notify) {
             ? cause.message
             : "Unable to load Shopify data.",
         );
+        setOverview({shopTimeZone:'UTC',sources:[]});
       } finally {
         if (!signal?.aborted && version === requestVersion.current) {
           setLoading(false);

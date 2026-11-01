@@ -26,7 +26,7 @@ function fixture() {
 test('history repository owns the implementation and preserves the old journal factory API', () => {
   assert.equal(createChangeJournalRepository,createHistoryRepository);
   const { repository } = fixture(); assert.ok(Object.isFrozen(repository));
-  for(const name of ['beginDispatch','getOperation','getRequest','getSnapshot','prepareRequest','recordMutationOutcome','recordVerification','scheduleOutcomeRecovery','consumeDispatch',
+  for(const name of ['beginDispatch','getOperation','getRequest','getSnapshot','prepareRequest','recordVerifiedNoWrite','recordMutationOutcome','recordVerification','scheduleOutcomeRecovery','consumeDispatch',
     'claimOutcomeRecovery','retryOutcomeRecovery','renewOutcomeRecovery','cancelOutcomeRecovery','discoverOutcomeRecovery','listOperations','listChanges'])assert.equal(typeof repository[name],'function');
   assert.equal(Object.hasOwn(repository,'query'),false);
 });

@@ -6,7 +6,7 @@
  * Security:
  * - Only compiler-issued SQL
  * - Authenticated shop binding
- * - Read-only, repeatable-read transactions
+ * - Read-only transactions protected by tenant publication locks
  * - Publication validation within the transaction
  * - Transaction-scoped database timeouts
  * - Bounded results
@@ -123,7 +123,7 @@ function assertQuery(query, shopId, compiler) {
 
   if (
     query.version !== FILTER_COMPILER_VERSION ||
-    !["product_ids", "catalog_product_ids"].includes(query.kind) ||
+    !["product_ids", "catalog_product_ids", "catalog_status", "catalog_count"].includes(query.kind) ||
     typeof query.text !== "string" ||
     !Array.isArray(query.values) ||
     !query.binding ||
@@ -234,37 +234,60 @@ export function createFilterExecutor({
   // Scoped by this executor instance; an HTTP request cannot supply a client.
   const snapshots = new AsyncLocalStorage();
 
-  async function withSnapshot({ authContext }, callback) {
+  async function withSnapshot({ authContext, signal, timeoutMs = 30000 }, callback) {
     if (typeof callback !== "function" || typeof publicationService.lockForRead !== "function" || snapshots.getStore()) {
       fail(C.CONTRACT_MISMATCH, "Protected selection transaction required");
     }
     const shopId = assertShopId(await resolveShop(authContext));
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30000) fail(C.INVALID_VALUE,"Invalid selection transaction deadline");
+    signal?.throwIfAborted();
     const client = await database.connect();
-    const scope = { client, shopId, active: true };
-    let discard;
+    const scope = { shopId, active: true,deadline:Date.now()+timeoutMs };
+    const check = () => {
+      signal?.throwIfAborted();
+      if (!scope.active || Date.now() >= scope.deadline) fail(C.EXECUTION_UNAVAILABLE,"Selection transaction deadline exceeded");
+    };
+    scope.client = Object.freeze({async query(...args){check();const result=await client.query(...args);check();return result;}});
+    let discard,timer,abort;
     try {
-      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ");
+      await client.query("BEGIN ISOLATION LEVEL READ COMMITTED");
       await client.query(`SET LOCAL statement_timeout = '${STATEMENT_TIMEOUT_MS}ms'`);
       await client.query(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT_MS}ms'`);
+      await client.query("SET LOCAL idle_in_transaction_session_timeout = '15000ms'");
       // Protect publication and mirror contents before establishing the snapshot.
-      await publicationService.lockForRead(client);
-      const result = await snapshots.run(scope, () =>
-        withCoverageTransaction(client, () => callback({ client, shopId })),
+      await publicationService.lockForRead(client,shopId);
+      const pending = snapshots.run(scope, () =>
+        withCoverageTransaction(scope.client, async () => {
+          const result=await callback({client:scope.client,shopId});
+          check();
+          if(assertShopId(await resolveShop(authContext))!==shopId)
+            fail(C.PERMISSION_DENIED,"Authenticated shop changed during selection");
+          check();
+          if(scope.lastQuery){
+            await compiler.authorizeExecution(scope.lastQuery,authContext);
+            assertQuery(scope.lastQuery,shopId,compiler);
+          }
+          check();
+          return result;
+        }),
       );
-      if (assertShopId(await resolveShop(authContext)) !== shopId) {
-        fail(C.PERMISSION_DENIED, "Authenticated shop changed during selection");
-      }
-      if (scope.lastQuery) {
-        await withCoverageTransaction(client, () => compiler.authorizeExecution(scope.lastQuery, authContext));
-        assertQuery(scope.lastQuery, shopId, compiler);
-      }
+      const deadline = new Promise((_,reject)=>{
+        const expire=()=>{scope.active=false;reject(signal?.aborted ? signal.reason : new FieldError(C.EXECUTION_UNAVAILABLE,"Selection transaction deadline exceeded"));};
+        timer=setTimeout(expire,Math.max(0,scope.deadline-Date.now()));
+        abort=expire;signal?.addEventListener('abort',abort,{once:true});
+        if(signal?.aborted)expire();
+      });
+      const result = await Promise.race([pending,deadline]);
+      check();
       await client.query("COMMIT");
       return result;
     } catch (error) {
+      scope.active = false;
       try { await client.query("ROLLBACK"); } catch (rollbackError) { discard = rollbackError; }
       throw error;
     } finally {
       scope.active = false;
+      clearTimeout(timer);if(abort)signal?.removeEventListener('abort',abort);
       client.release(discard);
     }
   }
@@ -327,13 +350,13 @@ export function createFilterExecutor({
 
       if (!snapshot) {
         await client.query(
-          "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY",
+          "BEGIN ISOLATION LEVEL READ COMMITTED READ ONLY",
         );
 
         transactionStarted = true;
 
-        // SET does not establish the repeatable-read data snapshot. Publication
-        // protection must precede the first SELECT, including configuration reads.
+        // Acquire tenant publication protection before reading catalog authority.
+        // READ COMMITTED observes commits made while the lock acquisition waits.
         await client.query(`SET LOCAL statement_timeout = '${STATEMENT_TIMEOUT_MS}ms'`);
         await client.query(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT_MS}ms'`);
       }
@@ -360,6 +383,21 @@ export function createFilterExecutor({
 
       // A migration can revoke the catalog capability while the barrier waits.
       assertQuery(query, shopId, compiler);
+
+      if (query.kind === "catalog_status" || query.kind === "catalog_count") {
+        if (!plan.catalog) fail(C.PERMISSION_DENIED,"Compiler-owned catalog authorization required");
+        let filteredCount;
+        if (query.kind === "catalog_count") {
+          const counted = await client.query({text:query.text,values:query.values});
+          if (!Array.isArray(counted.rows) || counted.rows.length !== 1 || !Object.hasOwn(counted.rows[0],"count")) fail(C.CONTRACT_MISMATCH,"Invalid catalog count projection");
+          filteredCount = catalogCount(counted.rows[0].count);
+        }
+        if (!snapshot) await client.query("COMMIT");
+        transactionStarted = false;
+        if (snapshot) snapshot.lastQuery = query;
+        return Object.freeze({generationId:query.binding.generationId,coverageRevision:query.binding.coverageRevision,
+          ...(filteredCount === undefined ? {} : {filteredCount})});
+      }
 
       const result = await client.query({
         text: query.text,

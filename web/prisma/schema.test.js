@@ -1,3 +1,5 @@
+import {testAuditSixTen} from '../mirror/integration/audit-six-ten.js';
+import {testTenantDatabase} from '../security/tenant-db.integration.js';
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
@@ -20,6 +22,7 @@ import { testSelection } from "../mirror/integration/selection.js";
 import { testCatalogImports } from "../mirror/integration/catalog-import.js";
 import { testSyncDbAdapter } from "../mirror/integration/sync-db-adapter.js";
 import { testCatalogPhases } from "../mirror/integration/catalog-phases.js";
+import { testHistoryHttp } from "../edit-history/integration/history-http.js";
 import { createExportRepository } from "../export/export-repository.server.js";
 import { EXPORT_ERROR_CODES, EXPORT_STATES, exportRequestFingerprint, normalizeExportRequest } from "../export/export-contract.js";
 
@@ -218,7 +221,8 @@ test("METAMAX schema enforces tenancy, ingestion, publication and approval bound
       WHERE shop_id='a.myshopify.com'`), { code: "23514" });
     await query(`UPDATE mirror.subscriptions SET status='CANCELLED',verification_revision=2 WHERE shop_id='a.myshopify.com'`);
     await assert.rejects(() => query(`UPDATE mirror.shops SET installation_version='install-new'
-      WHERE id='a.myshopify.com'`), { code: "23001" });
+      WHERE id='a.myshopify.com'`), error => ['23001','23503'].includes(error.code) &&
+        error.constraint === 'subscriptions_shop_id_installation_version_fkey');
     await query(`DELETE FROM mirror.subscriptions WHERE shop_id='a.myshopify.com'`);
     await query(`UPDATE mirror.shops SET installation_version='install-new' WHERE id='a.myshopify.com'`);
     await assert.rejects(() => query(`INSERT INTO mirror.subscriptions(shop_id,installation_version,updated_at)
@@ -370,11 +374,11 @@ test("METAMAX schema enforces tenancy, ingestion, publication and approval bound
       const writer = await pool.connect();
       try {
         await writer.query("BEGIN");
-        await publication.lockForWrite(writer);
-        await writer.query(`INSERT INTO mirror.shops(id,installation_version) VALUES ($1,'installed-test');
+        await publication.lockForWrite(writer,shopId);
+        await writer.query(`INSERT INTO mirror.shops(id,installation_version) VALUES ($1,'55555555-5555-4555-8555-555555555555');
         `,[shopId]);
         await writer.query(`INSERT INTO mirror.generations(shop_id,id,coverage_revision,mirror_schema_version,source_contract_version,mapping_version)
-          VALUES ($1,$2,'installed-r1',$3,$4,'installed-mapping')`,[shopId,generationId,installed.mirrorSchemaVersion,installed.sourceContractVersion]);
+          VALUES ($1,$2,'installed-r1',$3,$4,'mapping_v1')`,[shopId,generationId,installed.mirrorSchemaVersion,installed.sourceContractVersion]);
         await writer.query(`INSERT INTO mirror.products(shop_id,generation_id,shopify_id,title,handle,status,vendor,tags,created_at,updated_at)
           VALUES ($1,$2,'gid://shopify/Product/10','Installed','first','ACTIVE','North',ARRAY['Summer','100%_literal'],now(),now()),
                  ($1,$2,'gid://shopify/Product/11','Installed','second','ACTIVE','South',ARRAY[]::text[],now(),now())`,[shopId,generationId]);
@@ -396,7 +400,7 @@ test("METAMAX schema enforces tenancy, ingestion, publication and approval bound
             published_at=CASE WHEN $3='PUBLISHED' THEN now() ELSE published_at END WHERE shop_id=$1 AND id=$2`,[shopId,generationId,state]);
         }
         await writer.query(`INSERT INTO mirror.publications(shop_id,generation_id,coverage_revision,mapping_version)
-          VALUES ($1,$2,'installed-r1','installed-mapping')`,[shopId,generationId]);
+          VALUES ($1,$2,'installed-r1','mapping_v1')`,[shopId,generationId]);
         await writer.query("COMMIT");
       } finally { await writer.query("ROLLBACK"); writer.release(); }
       assert.deepEqual(await repository.getPublishedContext({ shopId }),
@@ -433,7 +437,7 @@ test("METAMAX schema enforces tenancy, ingestion, publication and approval bound
         const client = await pool.connect();
         try {
           await client.query("BEGIN");
-          await publication.lockForWrite(client);
+          await publication.lockForWrite(client,"schema-migration.myshopify.com");
           await client.query(`ALTER TABLE mirror.variants RENAME COLUMN ${from} TO ${to}`);
           await client.query("COMMIT");
         } finally { await client.query("ROLLBACK"); client.release(); }
@@ -465,6 +469,7 @@ test("METAMAX schema enforces tenancy, ingestion, publication and approval bound
     await testCatalogImports(t,pool);
     await testSyncDbAdapter(t,pool);
     await testCatalogPhases(t,pool);
+    await testHistoryHttp(t,pool);
     await t.test("export v2 manifest repository enforces atomic idempotency fingerprint check, generation read lease, and outbox creation", async () => {
       const exportShop = "export-v2-manifest.myshopify.com";
       const exportInstall = "export-v2-install";
@@ -580,6 +585,8 @@ test("METAMAX schema enforces tenancy, ingestion, publication and approval bound
         { code: "23514" },
       );
     });
+    await testAuditSixTen({t,pool});
+    await testTenantDatabase(t,pool,target);
   } finally {
     await pool.end();
   }

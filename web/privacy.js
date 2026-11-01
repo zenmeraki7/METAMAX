@@ -1,7 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { DeliveryMethod } from "@shopify/shopify-api";
 import { createReconciliationService } from "./mirror/reconciliation-service.server.js";
-import { database as defaultDatabase } from "./db/postgres.js";
 import { FieldError, FIELD_ERROR_CODES as C } from "./fields/types.js";
 import { transaction } from "./mirror/transactions.server.js";
 
@@ -37,7 +36,7 @@ export async function extractProductIds(topic, payload, database, shopId) {
   }
 
   // 2. Direct product ID on product topics
-  if (normalizedTopic.includes("PRODUCT") && payload.id) {
+  if (normalizedTopic.startsWith("PRODUCTS_") && payload.id) {
     const rawId = String(payload.id);
     return [rawId.startsWith("gid://") ? rawId : `gid://shopify/Product/${rawId}`];
   }
@@ -60,50 +59,8 @@ export async function extractProductIds(topic, payload, database, shopId) {
       .filter(id => typeof id === "string" && /^gid:\/\/shopify\/Product\/[1-9][0-9]*$/.test(id));
   }
 
-  // 5. Database lookup for inventory levels or inventory items
-  if (database && shopId) {
-    if (normalizedTopic.includes("INVENTORY_LEVEL") && payload.inventory_item_id) {
-      try {
-        const res = await database.query(
-          `SELECT DISTINCT p.shopify_id FROM mirror.variants v
-           JOIN mirror.products p ON p.shop_id=v.shop_id AND p.generation_id=v.generation_id AND p.id=v.product_id
-           WHERE v.shop_id=$1 AND v.inventory_item_id=$2`,
-          [shopId, BigInt(payload.inventory_item_id)],
-        );
-        return res.rows.map(r => r.shopify_id);
-      } catch {
-        return [];
-      }
-    }
-    if (normalizedTopic.includes("INVENTORY_ITEM") && payload.id) {
-      try {
-        const res = await database.query(
-          `SELECT DISTINCT p.shopify_id FROM mirror.variants v
-           JOIN mirror.products p ON p.shop_id=v.shop_id AND p.generation_id=v.generation_id AND p.id=v.product_id
-           WHERE v.shop_id=$1 AND v.inventory_item_id=$2`,
-          [shopId, BigInt(payload.id)],
-        );
-        return res.rows.map(r => r.shopify_id);
-      } catch {
-        return [];
-      }
-    }
-    if (normalizedTopic.includes("COLLECTION") && payload.id) {
-      try {
-        const colGid = String(payload.id).startsWith("gid://") ? String(payload.id) : `gid://shopify/Collection/${payload.id}`;
-        const res = await database.query(
-          `SELECT DISTINCT p.shopify_id FROM mirror.product_collections pc
-           JOIN mirror.products p ON p.shop_id=pc.shop_id AND p.generation_id=pc.generation_id AND p.id=pc.product_id
-           JOIN mirror.collections c ON c.shop_id=pc.shop_id AND c.generation_id=pc.generation_id AND c.id=pc.collection_id
-           WHERE pc.shop_id=$1 AND c.shopify_id=$2`,
-          [shopId, colGid],
-        );
-        return res.rows.map(r => r.shopify_id);
-      } catch {
-        return [];
-      }
-    }
-  }
+  // Related-resource IDs are not product IDs. Until a verified physical
+  // relation is installed, the handler persists a broader catalog refresh.
 
   return [];
 }
@@ -131,9 +88,9 @@ export async function handleWebhookEvent({
       // Keep a tombstone even when installation scheduling never committed.
       await client.query(`INSERT INTO mirror.shops(id,installation_version,uninstalled_at)
         VALUES ($1,$2,clock_timestamp()) ON CONFLICT(id) DO NOTHING`, [shop,randomUUID()]);
-      const previous = (await client.query("SELECT payload_hash FROM mirror.webhook_receipts WHERE shop_id=$1 AND event_id=$2", [shop,eventId])).rows[0];
+      const previous = (await client.query("SELECT payload_hash,topic FROM mirror.webhook_receipts WHERE shop_id=$1 AND event_id=$2", [shop,eventId])).rows[0];
       if (previous) {
-        if (previous.payload_hash !== payloadHash) throw new FieldError(C.CONTRACT_MISMATCH, "Event identity reused for different intent");
+        if (previous.payload_hash !== payloadHash || previous.topic!==normalizedTopic) throw new FieldError(C.CONTRACT_MISMATCH, "Event identity reused for different intent");
         return {acknowledged:true,duplicate:true};
       }
       // The uninstall trigger records the exact historical installation and
@@ -153,7 +110,7 @@ export async function handleWebhookEvent({
       await client.query(`INSERT INTO mirror.webhook_receipts(shop_id,event_id,topic,payload_hash,received_at,processed_at)
         VALUES ($1,$2,$3,$4,now(),now())`, [shop,eventId,normalizedTopic,payloadHash]);
       return {acknowledged:true};
-    });
+    }, shop);
   }
 
   // 1. Session cleanup compliance for APP_UNINSTALLED and SHOP_REDACT
@@ -166,6 +123,8 @@ export async function handleWebhookEvent({
 
   // If no reconciliationService or database is configured, early return
   if (!reconciliationService && !database) {
+    if(/^(PRODUCTS_|COLLECTIONS_|INVENTORY_LEVELS_|INVENTORY_ITEMS_|BULK_OPERATIONS_FINISH)/.test(normalizedTopic))
+      throw new FieldError(C.MISSING_DEPENDENCY,'Durable webhook persistence unavailable');
     return { acknowledged: true };
   }
 
@@ -187,48 +146,19 @@ export async function handleWebhookEvent({
   const productIds = await extractProductIds(normalizedTopic, payload, database, shop);
   const deleted = normalizedTopic.includes("DELETE");
 
-  if (database && normalizedTopic === "BULK_OPERATIONS_FINISH" && payload?.admin_graphql_api_id) {
-    try {
-      await database.query(
-        `UPDATE mirror.sync_external_operations
-         SET remote_status = $3, object_count = COALESCE($4, object_count), updated_at = now()
-         WHERE shop_id = $1 AND operation_id = $2`,
-        [
-          shop,
-          payload.admin_graphql_api_id,
-          payload.status || "COMPLETED",
-          payload.object_count ? BigInt(payload.object_count) : null,
-        ],
-      );
-    } catch {
-      // Non-fatal; background polling will also verify remote status
-    }
+  // A signed completion webhook is a scheduling hint, not proof that the
+  // exact registered remote operation has completed. Persist its receipt below;
+  // the existing phase poller verifies remote identity and terminal status.
+  const refresh = /^(PRODUCTS_|COLLECTIONS_|INVENTORY_LEVELS_|INVENTORY_ITEMS_)/.test(normalizedTopic);
+  // Missing product identity is not proof that an event affected no products.
+  // A durable full refresh safely handles unavailable related-resource mappings.
+  if (typeof effectiveReconciliationService?.recordWebhookEvent !== "function") {
+    throw new FieldError(C.CONTRACT_MISMATCH, "Atomic webhook persistence required");
   }
-
-  if (productIds.length > 0) {
-    // Persist verified event identity and mutation journal for each affected product
-    for (const productId of productIds) {
-      const sourceKey = productIds.length === 1 ? `webhook:${eventId}` : `webhook:${eventId}:${productId}`;
-      await effectiveReconciliationService.recordMutationEvent({
-        shopId: shop,
-        productId,
-        sourceKey,
-        source: "WEBHOOK",
-        deleted,
-        payloadHash,
-        eventId,
-        topic: normalizedTopic,
-      });
-    }
-  } else {
-    // Persist verified event identity for related resource or non-product webhook
-    await effectiveReconciliationService.recordWebhookReceipt({
-      shopId: shop,
-      eventId,
-      topic: normalizedTopic,
-      payloadHash,
-    });
-  }
+  await effectiveReconciliationService.recordWebhookEvent({
+    shopId: shop, eventId, topic: normalizedTopic, payloadHash,
+    productIds, deleted, refresh,
+  });
 
   return { acknowledged: true };
 }

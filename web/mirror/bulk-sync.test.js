@@ -193,6 +193,7 @@ test("bulk-sync: monitorBulkOperation polls until terminal status", async () => 
 
 test("bulk-sync: cancelBulkQuery cancels local generation first, then remote bulk operation", async () => {
   const steps = [];
+  let remoteStatus="CANCELING";
   const mockSyncRunService = {
     async getSyncRun() {
       return {
@@ -215,7 +216,7 @@ test("bulk-sync: cancelBulkQuery cancels local generation first, then remote bul
             bulkOperationCancel: {
               bulkOperation: {
                 id: "gid://shopify/BulkOperation/cancel-me",
-                status: "CANCELING",
+                status: remoteStatus,
               },
               userErrors: [],
             },
@@ -231,6 +232,9 @@ test("bulk-sync: cancelBulkQuery cancels local generation first, then remote bul
     syncRunService: mockSyncRunService,
   });
 
+  const pending=await service.cancelBulkQuery({shopId,runId:99n});
+  assert.equal(pending.cancelled,false);assert.equal(pending.state,'CANCELLING');assert.equal(pending.cancelPending,true);assert.equal(pending.outcomeUncertain,false);
+  remoteStatus='CANCELLED';steps.length=0;
   const res = await service.cancelBulkQuery({ shopId, runId: 99n });
   assert.equal(res.cancelled, true);
   assert.equal(res.remote, true);
@@ -305,4 +309,20 @@ test("bulk-sync: recoverBulkQuery checks bound status or inspects orphan state w
   assert.equal(rec2.bound, false);
   assert.equal(rec2.readyToIngest, false);
   assert.equal(rec2.orphanOperation.id, "gid://shopify/BulkOperation/orphan");
+});
+
+test('bulk cancellation preserves unknown remote outcomes and reconciles accepted cancellation without resending',async()=>{
+ let status='CANCELING',mutations=0,local=0;
+ const id='gid://shopify/BulkOperation/55';
+ const syncRunService={getSyncRun:async()=>({generationId:'generation',bulkOperationId:id}),cancelGeneration:async()=>{local++;}};
+ const shopifyClient={async request(query){if(query.includes('CancelMirrorBulk')){mutations++;throw Error('response lost');}
+  return {data:{bulkOperation:status==='missing'?null:{id,status}}};}};
+ const service=createBulkSyncService({syncRunService,shopifyClient});
+ const first=await service.cancelBulkQuery({shopId,runId:1});assert.equal(first.state,'CANCELLING');assert.equal(mutations,1);
+ const pending=await service.cancelBulkQuery({shopId,runId:1,reconcile:true});assert.equal(pending.cancelPending,true);assert.equal(mutations,1);
+ status='missing';const unknown=await service.cancelBulkQuery({shopId,runId:1,reconcile:true});
+ assert.equal(unknown.outcomeUncertain,true);assert.equal(unknown.cancelled,false);
+ status='CANCELLED';assert.equal((await service.cancelBulkQuery({shopId,runId:1,reconcile:true})).cancelled,true);assert.equal(local,4);
+ const unbound=createBulkSyncService({syncRunService:{...syncRunService,getSyncRun:async()=>({generationId:'generation'})},shopifyClient});
+ assert.equal((await unbound.cancelBulkQuery({shopId,runId:1})).outcomeUncertain,true);
 });

@@ -1,0 +1,15 @@
+model CatalogRefreshRequest {
+  reviewRequired Boolean @default(false) @map("review_required")
+  lastError String? @map("last_error") @db.Text
+  shopId              String   @id @map("shop_id") @db.Text
+  installationVersion String   @map("installation_version") @db.Text
+  requestedRevision   BigInt   @default(1) @map("requested_revision")
+  scheduledRevision   BigInt   @default(0) @map("scheduled_revision")
+  attempts            Int      @default(0)
+  nextAttemptAt       DateTime @default(now()) @map("next_attempt_at") @db.Timestamptz(3)
+  updatedAt           DateTime @default(now()) @map("updated_at") @db.Timestamptz(3)
+  shop                Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@map("catalog_refresh_requests")
+  @@schema("mirror")
+}

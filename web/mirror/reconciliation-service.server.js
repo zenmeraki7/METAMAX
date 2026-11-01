@@ -10,6 +10,7 @@ import {
   validateProducts,
   writeCatalogProducts,
 } from "./catalog-writer.server.js";
+import { requestCatalogRefresh } from "./catalog-refresh.server.js";
 function product(value) {
   if (
     typeof value !== "string" ||
@@ -21,36 +22,7 @@ function product(value) {
 export function createReconciliationService({ database, authorizeWrite }) {
   if (typeof database?.connect !== "function")
     throw new TypeError("PostgreSQL pool required");
-  const service = Object.freeze({
-    async recordWebhookReceipt({ shopId, eventId, topic, payloadHash }) {
-      shop(shopId);
-      if (typeof eventId !== "string" || !eventId || eventId.length > 255)
-        invalid("Valid event identity required");
-      if (typeof topic !== "string" || !topic || topic.length > 100)
-        invalid("Valid webhook topic required");
-      if (!/^[a-f0-9]{64}$/.test(payloadHash))
-        invalid("Invalid event hash");
-      return transaction(database, async (client) => {
-        const existingReceipt = (
-          await client.query(
-            `SELECT payload_hash FROM mirror.webhook_receipts WHERE shop_id=$1 AND event_id=$2`,
-            [shopId, eventId],
-          )
-        ).rows[0];
-        if (existingReceipt) {
-          if (existingReceipt.payload_hash !== payloadHash)
-            invalid("Event identity reused for different intent");
-          return { duplicate: true, eventId };
-        }
-        await client.query(
-          `INSERT INTO mirror.webhook_receipts(shop_id,event_id,topic,payload_hash,received_at,processed_at)
-          VALUES($1,$2,$3,$4,now(),now())`,
-          [shopId, eventId, topic, payloadHash],
-        );
-        return { duplicate: false, eventId };
-      });
-    },
-    async recordMutationEvent({
+  async function recordMutationEvent({
       shopId,
       productId,
       sourceKey,
@@ -60,7 +32,7 @@ export function createReconciliationService({ database, authorizeWrite }) {
       syncRunId = null,
       eventId = null,
       topic = null,
-    }) {
+    }, transactionClient) {
       shop(shopId);
       product(productId);
       if (
@@ -77,16 +49,16 @@ export function createReconciliationService({ database, authorizeWrite }) {
         invalid("Invalid event hash");
       if (eventId !== null && (typeof eventId !== "string" || !eventId || eventId.length > 255))
         invalid("Valid event identity required");
-      return transaction(database, async (client) => {
+      const write = async (client) => {
         if (eventId) {
           const existingReceipt = (
             await client.query(
-              `SELECT payload_hash FROM mirror.webhook_receipts WHERE shop_id=$1 AND event_id=$2`,
+              `SELECT payload_hash,topic FROM mirror.webhook_receipts WHERE shop_id=$1 AND event_id=$2`,
               [shopId, eventId],
             )
           ).rows[0];
           if (existingReceipt) {
-            if (existingReceipt.payload_hash !== payloadHash)
+            if (existingReceipt.payload_hash !== payloadHash || existingReceipt.topic!==(topic||source||"WEBHOOK"))
               invalid("Event identity reused for different intent");
             return { duplicate: true, eventId, revision: 0n };
           }
@@ -141,8 +113,67 @@ export function createReconciliationService({ database, authorizeWrite }) {
           dirty: true,
           duplicate: false,
         };
-      });
+      };
+      return transactionClient ? write(transactionClient) : transaction(database, write, shopId);
+  }
+
+  const service = Object.freeze({
+    /** One delivery receipt, all product revisions, and refresh intent commit together. */
+    async recordWebhookEvent({ shopId, eventId, topic, payloadHash, productIds = [], deleted = false, refresh = false }) {
+      shop(shopId);
+      if (typeof eventId !== "string" || !eventId || eventId.length > 255 ||
+          typeof topic !== "string" || !topic || topic.length > 100 ||
+          !/^[a-f0-9]{64}$/.test(payloadHash) || typeof deleted !== "boolean" || typeof refresh !== "boolean" ||
+          !Array.isArray(productIds) || productIds.length > 10000) invalid("Bounded verified webhook event required");
+      const ids = [...new Set(productIds)];
+      ids.forEach(product);
+      return transaction(database, async client => {
+        const previous = (await client.query(
+          "SELECT payload_hash,topic FROM mirror.webhook_receipts WHERE shop_id=$1 AND event_id=$2", [shopId,eventId],
+        )).rows[0];
+        if (previous) {
+          if (previous.payload_hash !== payloadHash || previous.topic!==topic) invalid("Event identity reused for different intent");
+          return { duplicate: true };
+        }
+        await client.query(`INSERT INTO mirror.webhook_receipts(shop_id,event_id,topic,payload_hash,received_at,processed_at)
+          VALUES($1,$2,$3,$4,now(),now())`, [shopId,eventId,topic,payloadHash]);
+        for (const productId of ids) {
+          const sourceKey = ids.length === 1 ? `webhook:${eventId}` : `webhook:${eventId}:${productId}`;
+          await recordMutationEvent({shopId,productId,sourceKey,source:"WEBHOOK",deleted,payloadHash}, client);
+        }
+        if (refresh || ids.length) await requestCatalogRefresh(client, shopId);
+        return { duplicate: false, products: ids.length };
+      }, shopId);
     },
+    async recordWebhookReceipt({ shopId, eventId, topic, payloadHash }) {
+      shop(shopId);
+      if (typeof eventId !== "string" || !eventId || eventId.length > 255)
+        invalid("Valid event identity required");
+      if (typeof topic !== "string" || !topic || topic.length > 100)
+        invalid("Valid webhook topic required");
+      if (!/^[a-f0-9]{64}$/.test(payloadHash))
+        invalid("Invalid event hash");
+      return transaction(database, async (client) => {
+        const existingReceipt = (
+          await client.query(
+            `SELECT payload_hash,topic FROM mirror.webhook_receipts WHERE shop_id=$1 AND event_id=$2`,
+            [shopId, eventId],
+          )
+        ).rows[0];
+        if (existingReceipt) {
+          if (existingReceipt.payload_hash !== payloadHash || existingReceipt.topic !== topic)
+            invalid("Event identity reused for different intent");
+          return { duplicate: true, eventId };
+        }
+        await client.query(
+          `INSERT INTO mirror.webhook_receipts(shop_id,event_id,topic,payload_hash,received_at,processed_at)
+          VALUES($1,$2,$3,$4,now(),now())`,
+          [shopId, eventId, topic, payloadHash],
+        );
+        return { duplicate: false, eventId };
+      }, shopId);
+    },
+    recordMutationEvent: input => recordMutationEvent(input),
     async scanDueDirtyProducts({ shopId, limit = 50 }) {
       shop(shopId);
       integer(limit, 1, 200, "scanner limit");
@@ -186,7 +217,7 @@ export function createReconciliationService({ database, authorizeWrite }) {
               deleted: row.deleted,
             }
           : null;
-      });
+      }, shopId);
     },
     async reconcileProduct({
       shopId,
@@ -230,7 +261,11 @@ export function createReconciliationService({ database, authorizeWrite }) {
             deleted,
           ],
         );
-        if (applied.rowCount !== 1) return { applied: false, superseded: true };
+        if (applied.rowCount !== 1) {
+          const latest=(await client.query('SELECT revision,applied_revision,fence FROM mirror.catalog_changes WHERE shop_id=$1 AND product_id=$2',[shopId,productId])).rows[0];
+          if(!latest||BigInt(latest.revision)!==rev||BigInt(latest.applied_revision)>=rev||BigInt(latest.fence)!==BigInt(fence))return {applied:false,superseded:true};
+          throw Object.assign(Error('Product reconciliation lease expired'),{code:'PRODUCT_LEASE_LOST'});
+        }
         if (deleted) {
           // Tombstone intent stays in catalog_changes/journal, never in searchable rows.
           await client.query(
@@ -267,7 +302,7 @@ export function createReconciliationService({ database, authorizeWrite }) {
           [shopId, productId, rev.toString()],
         );
         return { applied: true, revision: rev };
-      });
+      }, shopId);
     },
     async recordFailure({
       shopId,
@@ -276,6 +311,7 @@ export function createReconciliationService({ database, authorizeWrite }) {
       error,
       maxAttempts = 8,
       backoffBaseMs = 1000,
+      observedRevision,
     }) {
       shop(shopId);
       product(productId);
@@ -291,6 +327,7 @@ export function createReconciliationService({ database, authorizeWrite }) {
         dead_letter_at=CASE WHEN attempts+1 >= $5 THEN now() ELSE NULL END,
         next_attempt_at=CASE WHEN attempts+1 >= $5 THEN NULL ELSE now()+LEAST(3600000::numeric,$6::numeric*power(2,LEAST(attempts,20)))*interval '1 millisecond' END
         WHERE shop_id=$1 AND product_id=$2 AND fence=$3 AND dirty AND dead_letter_at IS NULL
+          AND ($7::bigint IS NULL OR revision=$7)
         RETURNING attempts,dead_letter_at,next_attempt_at`,
               [
                 shopId,
@@ -299,10 +336,10 @@ export function createReconciliationService({ database, authorizeWrite }) {
                 String(error?.message ?? error).slice(0, 2000),
                 maxAttempts,
                 backoffBaseMs,
+                observedRevision?.toString()??null,
               ],
             )
-          ).rows[0] ?? null,
-      );
+          ).rows[0] ?? null, shopId);
     },
     /** Scheduling tokens never supply authoritative revisions or deletion state. */
     async reconcileLatestProduct({
@@ -322,8 +359,14 @@ export function createReconciliationService({ database, authorizeWrite }) {
         workerId,
       });
       if (!claim) return { applied: false, skipped: true };
+      const controller=new AbortController();
+      const readSignal=signal?AbortSignal.any([signal,controller.signal]):controller.signal;
+      let deadline;
       try {
-        const snapshot = await fetchProduct({ shopId, productId, signal });
+        const snapshot = await Promise.race([Promise.resolve().then(()=>fetchProduct({shopId,productId,signal:readSignal})),new Promise((_,reject)=>{
+          deadline=setTimeout(()=>{const error=Object.assign(Error('Product read deadline exceeded'),{code:'PRODUCT_READ_TIMEOUT'});controller.abort(error);reject(error);},20000);
+        })]);
+        clearTimeout(deadline);
         signal?.throwIfAborted();
         // Adapter must finish every variant page; partial responses must reject.
         if (
@@ -347,10 +390,11 @@ export function createReconciliationService({ database, authorizeWrite }) {
           shopId,
           productId,
           fence: claim.fence,
+          observedRevision:claim.revision,
           error,
         });
         throw error;
-      }
+      } finally {clearTimeout(deadline);controller.abort();}
     },
   });
   return service;

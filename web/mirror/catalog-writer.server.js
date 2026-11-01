@@ -13,7 +13,7 @@ export async function writeCatalogProducts({
   shop(shopId);
   token(generationId);
   validateProducts(records);
-  if(records.length>1)return writeCatalogBatch({client,shopId,generationId,records});
+  if(records.length>1 || records[0].variants.length>8)return writeCatalogBatch({client,shopId,generationId,records});
   // 1. Insert products
   for (const record of records) {
     const pGid = record.id || record.shopifyId;
@@ -184,8 +184,7 @@ export function createCatalogWriter({ database } = {}) {
         throw new TypeError("Database client or connection pool required");
       }
       return transaction(database, (c) =>
-        writeCatalogProducts({ client: c, shopId, generationId, records }),
-      );
+        writeCatalogProducts({ client: c, shopId, generationId, records }), shopId);
     },
     async writeProducts({ client, shopId, generationId, records }) {
       return this.writeCatalogProducts({

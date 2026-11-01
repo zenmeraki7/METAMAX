@@ -1,3 +1,4 @@
+import {lockPublication} from "../mirror/publication-lock.server.js";
 /** Transaction-scoped bridge to the actual Mirror Engine read-lease service.
  * It never changes a job's lease identity or substitutes the current generation.
  * Callers must hold the publication write barrier before taking job/lease locks.
@@ -36,6 +37,7 @@ export function createExportGenerationProtection({ publicationService, leaseSeco
   if (!Number.isSafeInteger(leaseSeconds) || leaseSeconds < 60 || leaseSeconds > 604800) throw new TypeError("Bounded generation lease duration required");
 
   async function pinned({client, identity, job, manifest, allowExpired = false}) {
+    await lockPublication(client,identity.shopId,{write:true});
     if (job?.manifest && typeof job.manifest === "object") {
       if (
         (job.manifest.generationId !== undefined && String(job.manifest.generationId) !== String(job.generation_id)) ||

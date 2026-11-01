@@ -125,5 +125,18 @@ export function createCatalogRouter({
       : unavailable,
   );
 
+  router.get('/capabilities',async(req,res,next)=>{
+    try {
+      const authContext=await authentication.authenticate(req);
+      if(!authContext)return res.status(401).json({error:'UNAUTHENTICATED'});
+      if(Object.keys(req.query).length)return res.status(400).json({error:'INVALID_CAPABILITY_QUERY'});
+      if(!catalogQueryService?.queryCapabilities)return unavailable(req,res);
+      return res.json(await catalogQueryService.queryCapabilities({authContext}));
+    } catch(error) {
+      if(res.headersSent)return next(error);
+      const failure=describeFilterFailure(error);
+      return res.status(failure.status).json({error:failure.code,retryable:failure.retryable});
+    }
+  });
   return router;
 }

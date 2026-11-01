@@ -1,3 +1,8 @@
+// Interface contract (repository root): docs/backend-interface-contracts.md#approval-and-approval-reads
+import {APPROVAL_SCHEMA_VERSION,readApprovalCoordinates,verifyApprovalCoordinates} from './approval-coordinates.server.js';
+import {bindExecutionCoordinates,executionAuthorityRecord} from './execution-contract.server.js';
+import {resourceUpdates,undoInstructions,importInstructions} from './operation-instructions.server.js';
+import {WRITE_CAPABILITY_VERSION,assertWriteCapabilityVersion,HISTORY_EXECUTION_CAPABILITIES,requireResourceWriteContract,assertInstalledUndoCapability} from '../fields/write-capabilities.js';
 /**
  * METAMAX — Immutable Approval Service
  *
@@ -10,7 +15,7 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import { FieldError, FIELD_ERROR_CODES as C } from "../fields/types.js";
+import { deepFreeze, FieldError, FIELD_ERROR_CODES as C } from "../fields/types.js";
 
 const DEFAULT_APPROVAL_LIFETIME_MS = 1800000; // 30 minutes
 
@@ -48,7 +53,11 @@ export function canonicalApproval({shopId,snapshotId,operation,contract,selectio
   return JSON.stringify(canonicalJsonValue(JSON.parse(JSON.stringify({hashVersion:"canonical-v2",shopId,snapshotId,operation,contract,selectionHash,approvedBy}))));
 }
 
-export async function getApprovedContractInTransaction({ client, shopId, contractId } = {}) {
+export const getApprovedContractInTransaction=({client,shopId,contractId}={})=>readExecutionContract({client,shopId,contractId});
+// Evidence-only reading of an immutable historical approval. This cannot issue
+// a live execution grant and does not refresh expiry or adapter compatibility.
+export const getEvidenceContractInTransaction=({client,shopId,contractId}={})=>readExecutionContract({client,shopId,contractId,historical:true});
+async function readExecutionContract({ client, shopId, contractId,historical=false } = {}) {
   if (typeof client?.query !== "function") throw new TypeError("Explicit transaction query client required");
       if (!shopId || !contractId) {
         fail(C.INVALID_VALUE, "shopId and contractId required");
@@ -64,12 +73,15 @@ export async function getApprovedContractInTransaction({ client, shopId, contrac
 
       const contract = res.rows[0];
       if (!contract) return null;
+      if (contract.shop_id !== shopId || contract.id !== contractId) {
+        fail(C.CONTRACT_MISMATCH, "Execution contract identity mismatch");
+      }
 
       // Verify status and expiration
-      if (contract.status !== "APPROVED") {
+      if (historical?!['APPROVED','REVOKED','EXPIRED'].includes(contract.status):contract.status !== "APPROVED") {
         fail(C.EXECUTION_UNAVAILABLE, "Execution contract is not approved");
       }
-      if (new Date(contract.expires_at).getTime() <= Date.now()) {
+      if (!Number.isFinite(new Date(contract.expires_at).getTime()) || !historical&&new Date(contract.expires_at).getTime() <= Date.now()) {
         fail(C.EXECUTION_UNAVAILABLE, "Execution contract has expired");
       }
 
@@ -97,14 +109,23 @@ export async function getApprovedContractInTransaction({ client, shopId, contrac
         fail(C.CONTRACT_MISMATCH, "Execution contract tampering detected; contractHash mismatch");
       }
 
-      return contract;
+      const coordinates=historical?contract.contract?.executionCoordinates:await verifyApprovalCoordinates({client:q,shopId,contract});
+      if(!coordinates||coordinates.shopId!==shopId||coordinates.snapshotId!==contract.snapshot_id||coordinates.operation!==contract.operation||coordinates.selectionHash!==contract.selection_hash)
+        fail(C.CONTRACT_MISMATCH,'Persisted execution authority differs from approval');
+      return Object.freeze({...contract,contract:deepFreeze(canonicalJsonValue(contract.contract)),evidenceOnly:historical,executionAuthority:executionAuthorityRecord(contract,coordinates)});
 }
 
+/** Trusted bootstrap adapters: resolveMerchantActor must authenticate the opaque
+ * context and return {id, shopId}. authorizeApproval (or authorizeImportApproval
+ * for imports) must check current operation/field permissions and return true.
+ * It receives the active transaction client, actor, payload and selection.
+ * Read-only contract retrieval does not require these approval adapters. */
 export function createApprovalService({
   database,
   selectionService,
   resolveMerchantActor,
   authorizeImportApproval,
+  authorizeApproval,
   logger = console,
 } = {}) {
   if (!database || typeof database.query !== "function") {
@@ -128,44 +149,38 @@ export function createApprovalService({
       if (!shopId || !snapshotId) {
         fail(C.INVALID_VALUE, "shopId and snapshotId required");
       }
-      let importActor;
-      if(operation==="import") {
-        if(!authContext||typeof resolveMerchantActor!=="function"||typeof authorizeImportApproval!=="function")fail(C.PERMISSION_DENIED,"Verified explicit merchant import approval required");
-        importActor=await resolveMerchantActor(authContext);
-        if(!importActor||importActor.shopId!==shopId||typeof importActor.id!=="string"||!importActor.id)fail(C.PERMISSION_DENIED,"Verified merchant actor required");
-        approvedBy=importActor.id;
-      }
-      if (!approvedBy || typeof approvedBy !== "string") {
-        fail(C.PERMISSION_DENIED, "Authorizing actor (approvedBy) required");
-      }
+      const authorize = operation === 'import' ? authorizeImportApproval : authorizeApproval;
+      if (!authContext || typeof resolveMerchantActor !== 'function' || typeof authorize !== 'function')
+        fail(C.PERMISSION_DENIED, 'Verified merchant identity and current approval authorization required');
+      const actor = await resolveMerchantActor(authContext);
+      if (!actor || actor.shopId !== shopId || typeof actor.id !== 'string' || !actor.id.trim() ||
+          (approvedBy !== undefined && approvedBy !== actor.id))
+        fail(C.PERMISSION_DENIED, 'Verified merchant actor required; approving actor cannot be overridden');
+      approvedBy = actor.id;
       if (!contractPayload || typeof contractPayload !== "object") {
         fail(C.INVALID_VALUE, "Validated contract payload required");
       }
 
-      const txClient = client || (await database.connect?.()) || database;
+      if (!client && typeof database.connect !== 'function')
+        fail(C.EXECUTION_UNAVAILABLE, 'Transactional approval storage required');
+      const txClient = client || await database.connect();
       const isExternalClient = Boolean(client);
 
       try {
-        if (!isExternalClient && database.connect) {
+        if (!isExternalClient) {
           await txClient.query("BEGIN ISOLATION LEVEL REPEATABLE READ");
         }
 
         // 1. Verify selection snapshot is approved, valid, and unexpired
-        const snapRes = await txClient.query(
-          `SELECT id, status, selection_hash, expires_at, generation_id,coverage_revision,operation_id
-           FROM mirror.selection_snapshots
-           WHERE shop_id = $1 AND id = $2 FOR SHARE`,
-          [shopId, snapshotId],
-        );
-
-        const snapshot = snapRes.rows[0];
+        const {snapshot,coordinates:baseCoordinates}=await readApprovalCoordinates({client:txClient,shopId,snapshotId});
+        if(snapshot.operation!==operation)fail(C.CONTRACT_MISMATCH,'Selection operation differs from approval');
         if (!snapshot) {
           fail(C.INVALID_VALUE, "Referenced selection snapshot not found");
         }
         if (snapshot.status !== "APPROVED") {
           fail(C.CONTRACT_MISMATCH, "Selection snapshot is not in APPROVED state");
         }
-        if (new Date(snapshot.expires_at).getTime() <= Date.now()) {
+        if (!Number.isFinite(new Date(snapshot.expires_at).getTime()) || new Date(snapshot.expires_at).getTime() <= Date.now()) {
           fail(C.EXECUTION_UNAVAILABLE, "Selection snapshot has expired");
         }
         let importPreview;
@@ -174,15 +189,63 @@ export function createApprovalService({
           importPreview=(await txClient.query("SELECT * FROM mirror.import_previews WHERE shop_id=$1 AND id=$2 FOR UPDATE",[shopId,contractPayload.previewId])).rows[0];
           if(!importPreview||importPreview.status!=="DRAFT"||importPreview.snapshot_id!==snapshotId||importPreview.preview_hash!==contractPayload.previewHash||new Date(importPreview.expires_at)<=new Date())fail(C.CONTRACT_MISMATCH,"Import preview is missing, changed, expired or already approved");
           const prepared=typeof importPreview.payload==="string"?JSON.parse(importPreview.payload):importPreview.payload;
+          assertWriteCapabilityVersion(prepared.writeCapabilityVersion);
           const canonicalPreview=canonicalApproval({shopId,snapshotId,operation:"import-preview",contract:prepared,selectionHash:snapshot.selection_hash,approvedBy:importPreview.created_by});
           if(canonicalPreview!==importPreview.canonical_preview||createHash("sha256").update(canonicalPreview).digest("hex")!==importPreview.preview_hash)fail(C.CONTRACT_MISMATCH,"Import preview hash mismatch");
-          if(await authorizeImportApproval({authContext,actor:importActor,operation:"import",preview:importPreview,payload:prepared,snapshot})!==true)fail(C.PERMISSION_DENIED,"Current import approval authorization required");
+          if(await authorizeImportApproval({client:txClient,authContext,actor,operation:"import",preview:importPreview,payload:prepared,snapshot})!==true)fail(C.PERMISSION_DENIED,"Current import approval authorization required");
           contractPayload={previewId:importPreview.id,previewHash:importPreview.preview_hash,...prepared};
         }
 
+        if(Object.hasOwn(contractPayload,'executionCoordinates')||Object.hasOwn(contractPayload,'executionAuthority'))fail(C.INVALID_VALUE,'Execution coordinates are server-owned');
+        const resourceType=contractPayload.resourceType??'product';
+        const executionCapability=Object.hasOwn(HISTORY_EXECUTION_CAPABILITIES.operations,operation)?HISTORY_EXECUTION_CAPABILITIES.operations[operation]:null;
+        if(executionCapability&&!executionCapability.resourceTypes.includes(resourceType))fail(C.UNSUPPORTED_OPERATION,'Operation has no installed writer for this resource type');
+        const writer=requireResourceWriteContract(resourceType);
+        if(contractPayload.resourceFamily!==undefined&&contractPayload.resourceFamily!==writer.resourceFamily)fail(C.UNSUPPORTED_OPERATION,'Resource family has no installed writer');
+        if(contractPayload.writeCapabilityVersion !== undefined)assertWriteCapabilityVersion(contractPayload.writeCapabilityVersion,{resourceType});
+        if(contractPayload.approvalSchemaVersion!==undefined&&contractPayload.approvalSchemaVersion!==APPROVAL_SCHEMA_VERSION)fail(C.CONTRACT_MISMATCH,'Approval schema version is incompatible');
+        const approvalRevision = randomUUID();
+        const coordinates=bindExecutionCoordinates({coordinates:baseCoordinates,payload:contractPayload,approvalRevision});
+        const executionCapabilities=deepFreeze({
+          executor:HISTORY_EXECUTION_CAPABILITIES.executor,
+          resourceType:writer.kind,
+          resourceFamily:writer.resourceFamily,
+          targetIdentity:writer.targetIdentity,
+          supportedFields:Object.values(writer.bindings),
+          operations:['set'],
+          valueKinds:['VALUE'],
+          maxResourcesPerRequest:1,
+          maxExecutionItemsPerRequest:1,
+          adapterVersion:writer.adapterVersion,
+        });
+        contractPayload={...contractPayload,resourceType:writer.kind,resourceFamily:writer.resourceFamily,executionCapabilities,approvalSchemaVersion:APPROVAL_SCHEMA_VERSION,writeCapabilityVersion:WRITE_CAPABILITY_VERSION,executionCoordinates:coordinates};
+        if(['bulk_edit','scheduled_edit','recurring_edit'].includes(operation))contractPayload={...contractPayload,updates:resourceUpdates(resourceType,contractPayload.updates)};
+        if(operation==='undo')undoInstructions({shop_id:shopId,status:'APPROVED',operation,contract:contractPayload},shopId);
+        if(operation==='import')importInstructions({shop_id:shopId,status:'APPROVED',operation,contract:contractPayload},shopId);
+        if(resourceType==='variant'){
+          const expectedPolicy=operation==='undo'?'VERIFIED_VARIANTS_OF_SOURCE_COMMAND':'ALL_VARIANTS_OF_SELECTED_PRODUCTS';
+          if(contractPayload.variantTargetingPolicy!==expectedPolicy)fail(C.INVALID_VALUE,'Explicit variant targeting policy required');
+          const targets=(await txClient.query(`SELECT count(*)::text AS target_count FROM (SELECT v.id FROM mirror.selection_items si
+           JOIN mirror.products p ON p.shop_id=si.shop_id AND p.generation_id=si.generation_id AND p.id=si.product_id
+           JOIN mirror.variants v ON v.shop_id=p.shop_id AND v.generation_id=p.generation_id AND v.product_id=p.id
+           ${operation==='undo'?"JOIN mirror.job_items original ON original.shop_id=v.shop_id AND original.command_id=$3 AND original.resource_id=v.shopify_id AND original.status='SUCCEEDED' JOIN mirror.product_snapshots ps ON ps.shop_id=original.shop_id AND ps.edit_item_id=original.id AND ps.confirmed_at IS NOT NULL AND ps.after_hash IS NOT NULL AND ps.before_values ?& $4::text[]":''}
+           WHERE si.shop_id=$1 AND si.snapshot_id=$2 LIMIT 100001) bounded_targets`,operation==='undo'?[shopId,snapshotId,contractPayload.sourceCommandId,contractPayload.fields]:[shopId,snapshotId])).rows[0];
+          const count=Number(targets?.target_count);
+          if(!Number.isSafeInteger(count)||count<1||count>100000||contractPayload.variantTargetCount!==undefined&&String(contractPayload.variantTargetCount)!==String(count))fail(C.CONTRACT_MISMATCH,'Verified bounded variant target set required');
+          contractPayload={...contractPayload,variantTargetCount:count};
+        }
+        contractPayload=deepFreeze(contractPayload);
+        const checkApproval = async () => {
+          const current = await resolveMerchantActor(authContext);
+          if (current?.shopId !== shopId || current.id !== approvedBy ||
+              await authorize({client:txClient,authContext,actor:current,shopId,operation,preview:importPreview,payload:contractPayload,snapshot}) !== true)
+            fail(C.PERMISSION_DENIED, 'Current approval authorization required');
+        };
+        await checkApproval();
+        if(operation==='undo')assertInstalledUndoCapability(resourceType);
+
         // 2. Compute canonical contract hash
         const contractId = randomUUID();
-        const approvalRevision = randomUUID();
         const contractHash = computeContractHash({
           shopId,
           snapshotId,
@@ -192,6 +255,7 @@ export function createApprovalService({
           approvedBy,
         });
         const canonical = canonicalApproval({shopId,snapshotId,operation,contract:contractPayload,selectionHash:snapshot.selection_hash,approvedBy});
+        const executionAuthority=executionAuthorityRecord({shop_id:shopId,snapshot_id:snapshotId,operation,approval_revision:approvalRevision,contract_hash:contractHash},coordinates);
 
         const now = new Date();
         const expiresAt = new Date(Math.min(now.getTime() + lifetimeMs, new Date(snapshot.expires_at).getTime()));
@@ -219,6 +283,7 @@ export function createApprovalService({
             canonical,
           ],
         );
+        await checkApproval();
         const frozen = await txClient.query(
           `UPDATE mirror.execution_contracts SET status='APPROVED'
            WHERE shop_id=$1 AND id=$2 AND status='DRAFT'`, [shopId,contractId],
@@ -226,7 +291,7 @@ export function createApprovalService({
         if (frozen.rowCount !== 1) fail(C.CONTRACT_MISMATCH, "Execution contract could not be approved");
         if(importPreview) {
           const actor=await resolveMerchantActor(authContext);
-          if(actor?.shopId!==shopId||actor.id!==importActor.id||await authorizeImportApproval({authContext,actor,operation:"import",preview:importPreview,payload:contractPayload,snapshot})!==true)fail(C.PERMISSION_DENIED,"Import approval authorization changed");
+          if(actor?.shopId!==shopId||actor.id!==approvedBy||await authorizeImportApproval({authContext,actor,operation:"import",preview:importPreview,payload:contractPayload,snapshot})!==true)fail(C.PERMISSION_DENIED,"Import approval authorization changed");
           const approved=await txClient.query("UPDATE mirror.import_previews SET status='APPROVED',contract_id=$3,approved_by=$4,approved_at=clock_timestamp() WHERE shop_id=$1 AND id=$2 AND status='DRAFT'",[shopId,importPreview.id,contractId,approvedBy]);
           if(approved.rowCount!==1)fail(C.CONTRACT_MISMATCH,"Import preview approval superseded");
         }
@@ -241,6 +306,7 @@ export function createApprovalService({
           snapshotId,
           operation,
           approvalRevision,
+          executionAuthority,
           status: "APPROVED",
           contractHash,
           approvedBy,

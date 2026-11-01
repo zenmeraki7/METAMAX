@@ -10,6 +10,8 @@
  */
 
 import { GenerationServiceError } from "./generation-service.server.js";
+import {isValidShopifySession} from '../middleware/session-validation.js';
+import {createDatabaseInstallationResolver,assertInstallationTenant} from '../security/installation-lifecycle.server.js';
 
 const VALID_DOMAIN_RE = /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/;
 const IDENTIFIER_RE = /^[A-Za-z0-9_-]{1,128}$/;
@@ -21,6 +23,7 @@ function fail(code, message) {
 export function createGenerationAuthorityProvider({
   sessionStorage = null,
   database = null,
+  resolveInstallation=database?createDatabaseInstallationResolver({database}):null,
 } = {}) {
   if (database && typeof database.connect !== "function") {
     throw new TypeError("Database pool must have connect() method");
@@ -60,45 +63,41 @@ export function createGenerationAuthorityProvider({
     }
 
     const sessionId =
-      context.sessionId ??
-      context.session?.id ??
-      (typeof context.authContext === "string" ? context.authContext : null);
+      (typeof context.sessionId === "string" && context.sessionId) ||
+      (typeof context.session?.id === "string" && context.session.id) ||
+      (typeof context.authContext === "string" && context.authContext) ||
+      null;
 
-    let session = context.session;
-    if (!session && sessionId) {
-      session = await sessionStorage.loadSession(sessionId);
+    if (!sessionId) {
+      fail("PERMISSION_DENIED", "Valid server-issued session ID required");
     }
 
+    // Load server-issued session authority; never trust a caller-supplied session object
+    const session = await sessionStorage.loadSession(sessionId);
+
     if (
-      !session ||
-      typeof session.id !== "string" ||
-      !session.id ||
-      typeof session.shop !== "string" ||
-      !VALID_DOMAIN_RE.test(session.shop) ||
-      typeof session.accessToken !== "string" ||
-      !session.accessToken ||
-      (session.expires != null && new Date(session.expires).getTime() <= Date.now())
+      !isValidShopifySession(session) || session.id !== sessionId
     ) {
       fail("PERMISSION_DENIED", "Authenticated Shopify session required or expired");
     }
 
-    // Verify tenant installation is active
-    if (database) {
-      const client = await database.connect();
-      try {
-        const shopRes = await client.query(
-          `SELECT id FROM mirror.shops WHERE id = $1 AND uninstalled_at IS NULL`,
-          [session.shop],
-        );
-        if (shopRes.rowCount === 0) {
-          fail("PERMISSION_DENIED", "Shop is not actively installed");
-        }
-      } finally {
-        client.release();
+    // If caller also provided a session object, it must match the server-issued session authority
+    if (context.session) {
+      if (
+        typeof context.session !== "object" ||
+        context.session.shop !== session.shop ||
+        context.session.id !== session.id ||
+        (context.session.accessToken && context.session.accessToken !== session.accessToken)
+      ) {
+        fail("PERMISSION_DENIED", "Supplied session does not match server-issued session authority");
       }
     }
 
-    return Object.freeze({ shopId: session.shop });
+    if(typeof resolveInstallation!=='function')fail('PERMISSION_DENIED','Exact active installation required');
+    let tenant;try{tenant=assertInstallationTenant(await resolveInstallation(session.shop));}catch{fail('PERMISSION_DENIED','Exact active installation required');}
+    if(tenant.shopId!==session.shop||context.installationVersion!==undefined&&context.installationVersion!==tenant.installationVersion)
+      fail('PERMISSION_DENIED','Generation installation differs from authenticated lifecycle');
+    return tenant;
   }
 
   async function authorizeWorkerClaim(action, claim) {
@@ -122,43 +121,33 @@ export function createGenerationAuthorityProvider({
     }
 
     if (!database) {
-      // In offline / mock test environments without database connection,
-      // require claim.fence to be provided explicitly.
-      const rawFence = claim.fence != null ? String(claim.fence) : null;
-      if (!rawFence || !IDENTIFIER_RE.test(rawFence)) {
-        fail("INVALID_AUTHORITY", "Valid durable fence required in worker claim");
-      }
-      const result = { shopId };
-      if (action === "publish") {
-        result.publisherFence = rawFence;
-      }
-      if (action === "claimCleanup" || action === "finishCleanup") {
-        result.cleanupFence = rawFence;
-      }
-      return Object.freeze(result);
+      fail("PERMISSION_DENIED", "Durable worker claim storage required; use an isolated authority adapter for offline tests");
     }
+    if(typeof resolveInstallation!=='function')fail('PERMISSION_DENIED','Exact worker installation required');
+    let tenant;try{tenant=assertInstallationTenant(await resolveInstallation(shopId));}catch(error){if(error.code!=='INSTALLATION_NOT_ACTIVE')throw error;fail('PERMISSION_DENIED','Exact worker installation required');}
+    if(claim.installationVersion!==tenant.installationVersion)fail('PERMISSION_DENIED','Worker installation lifecycle changed');
 
     // Query durable database records to verify active unexpired lease and resolve authoritative fence
     const client = await database.connect();
     try {
-      if (action === "publish") {
+      if (["publish", "verify", "retain", "release"].includes(action)) {
         const generationId = claim.generationId;
         if (typeof generationId !== "string" || !IDENTIFIER_RE.test(generationId)) {
-          fail("INVALID_AUTHORITY", "Valid generationId required in publisher claim");
+          fail("INVALID_AUTHORITY", "Valid generationId required in ingestion worker claim");
         }
 
         const runRes = await client.query(
-          `SELECT fence, lease_token, lease_until
-           FROM mirror.ingestion_runs
-           WHERE shop_id = $1 AND generation_id = $2 AND lease_token = $3
-             AND lease_until > clock_timestamp()
-           ORDER BY id DESC LIMIT 1`,
-          [shopId, generationId, leaseToken],
+          `SELECT r.fence,r.lease_token,r.lease_until FROM mirror.ingestion_runs r
+           JOIN mirror.catalog_import_jobs j ON j.shop_id=r.shop_id AND j.run_id=r.id AND j.generation_id=r.generation_id AND j.installation_version=$4
+           JOIN mirror.shops s ON s.id=j.shop_id AND s.installation_version=j.installation_version AND s.uninstalled_at IS NULL
+           WHERE r.shop_id=$1 AND r.generation_id=$2 AND r.lease_token=$3 AND r.lease_until>clock_timestamp()
+           ORDER BY r.id DESC LIMIT 1`,
+          [shopId, generationId, leaseToken,tenant.installationVersion],
         );
 
         const run = runRes.rows[0];
         if (!run) {
-          fail("PERMISSION_DENIED", "No active unexpired ingestion lease for publication");
+          fail("PERMISSION_DENIED", "No active unexpired ingestion worker lease");
         }
 
         const publisherFence = String(run.fence);
@@ -166,26 +155,23 @@ export function createGenerationAuthorityProvider({
           fail("INVALID_AUTHORITY", "Authoritative fence is invalid");
         }
 
-        return Object.freeze({ shopId, publisherFence });
+        return Object.freeze({tenant,...tenant,...(action==='publish'?{publisherFence}:{})});
       }
 
       if (action === "claimCleanup" || action === "finishCleanup") {
-        // Verify active cleanup lease from mirror.job_commands or cleanup lease token
+        // A caller-supplied fence never substitutes for a durable cleanup lease.
         const cmdRes = await client.query(
-          `SELECT fence, lease_token, lease_until
-           FROM mirror.job_commands
-           WHERE shop_id = $1 AND lease_token = $2
-             AND lease_until > clock_timestamp()
-           ORDER BY id DESC LIMIT 1`,
-          [shopId, leaseToken],
+          `SELECT c.fence,c.lease_token,c.lease_until FROM mirror.job_commands c
+           JOIN mirror.shops s ON s.id=c.shop_id AND s.installation_version=c.installation_version AND s.uninstalled_at IS NULL
+           WHERE c.shop_id=$1 AND c.lease_token=$2 AND c.installation_version=$3 AND c.kind='generation_cleanup'
+             AND c.status='RUNNING' AND c.cancel_requested_at IS NULL AND c.lease_until>clock_timestamp()
+           ORDER BY c.id DESC LIMIT 1`,
+          [shopId, leaseToken,tenant.installationVersion],
         );
 
         let cleanupFence;
         if (cmdRes.rowCount > 0) {
           cleanupFence = String(cmdRes.rows[0].fence);
-        } else if (claim.fence != null) {
-          // Dedicated cleanup token match
-          cleanupFence = String(claim.fence);
         } else {
           fail("PERMISSION_DENIED", "No active unexpired cleanup claim lease found");
         }
@@ -194,10 +180,10 @@ export function createGenerationAuthorityProvider({
           fail("INVALID_AUTHORITY", "Authoritative cleanup fence is invalid");
         }
 
-        return Object.freeze({ shopId, cleanupFence });
+        return Object.freeze({tenant,...tenant,cleanupFence});
       }
 
-      return Object.freeze({ shopId });
+      fail("PERMISSION_DENIED", "Unsupported worker authority action");
     } finally {
       client.release();
     }

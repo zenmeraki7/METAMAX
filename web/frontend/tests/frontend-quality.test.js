@@ -10,7 +10,7 @@ import { MemoryRouter, useLocation } from "react-router-dom";
 const entry = new URL(`./.quality-${process.pid}.mjs`, import.meta.url);
 const output = await build({
   stdin: {
-    contents: `export { default as ProductsTable } from './components/products/ProductsTable.jsx'; export {default as HomeSearch} from './components/home/HomeHeroSearch.jsx'; export {default as ProductsPage} from './pages/ProductsPage.jsx'; export {default as useShopifyData} from './hooks/useShopifyData.js'; export {default as AutomationNotice} from './components/automations/AutomationNotice.jsx'; export {default as HistoryTabs} from './components/history/HistoryTabs.jsx';`,
+    contents: `export { default as ProductsTable } from './components/products/ProductsTable.jsx'; export { default as ProductRow } from './components/products/ProductRow.jsx'; export { default as SyncSummary } from './components/settings/SyncSummary.jsx'; export { default as useSettingsDashboard } from './hooks/useSettingsDashboard.js'; export {default as HomeSearch} from './components/home/HomeHeroSearch.jsx'; export {default as ProductsPage} from './pages/ProductsPage.jsx'; export {default as useShopifyData} from './hooks/useShopifyData.js'; export {default as AutomationNotice} from './components/automations/AutomationNotice.jsx'; export {default as HistoryTabs} from './components/history/HistoryTabs.jsx'; export { default as HistoryDetailDialog } from './components/history/HistoryDetailDialog.jsx'; export { default as HistoryActionMenu } from './components/history/HistoryActionMenu.jsx'; export { default as SyncSourcesTable } from './components/settings/SyncSourcesTable.jsx';`,
     resolveDir: fileURLToPath(new URL("../", import.meta.url)),
     loader: "jsx",
   },
@@ -35,6 +35,14 @@ const setup = () => {
   const dom = new JSDOM('<div id="root"></div>', { pretendToBeVisual: true });
   globalThis.window = dom.window;
   globalThis.document = dom.window.document;
+  class Modal extends dom.window.HTMLElement {
+    showOverlay() {}
+    hideOverlay() {}
+  }
+  if (!dom.window.customElements.get('s-modal')) {
+    dom.window.customElements.define('s-modal', Modal);
+  }
+  globalThis.customElements = dom.window.customElements;
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   return { dom, root: createRoot(document.getElementById("root")) };
 };
@@ -163,6 +171,146 @@ test("native Polaris table pagination events, selection, unlisted status and adm
       table.dispatchEvent(new dom.window.Event("nextpage")),
     );
     assert.equal(next, 1, "loading prevents pagination");
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+  }
+});
+
+test("ProductRow renders 'Not tracked' for untracked products and primary image thumbnail", async () => {
+  const { dom, root } = setup();
+  const trackedProduct = {
+    id: "gid://shopify/Product/1",
+    title: "Tracked Product",
+    status: "ACTIVE",
+    variantCount: 1,
+    totalInventory: 0,
+    tracksInventory: true,
+    image: "https://cdn.shopify.com/shirt.png",
+  };
+  const untrackedProduct = {
+    id: "gid://shopify/Product/2",
+    title: "Untracked Product",
+    status: "ACTIVE",
+    variantCount: 1,
+    totalInventory: 0,
+    tracksInventory: false,
+    image: null,
+  };
+  try {
+    await act(async () =>
+      root.render(
+        React.createElement(
+          "s-table",
+          null,
+          React.createElement(
+            "s-table-body",
+            null,
+            React.createElement(components.ProductRow, {
+              product: trackedProduct,
+              columns: [{ key: "inventory" }],
+            }),
+            React.createElement(components.ProductRow, {
+              product: untrackedProduct,
+              columns: [{ key: "inventory" }],
+            }),
+          ),
+        ),
+      ),
+    );
+    const thumbnails = document.querySelectorAll("s-thumbnail");
+    assert.equal(thumbnails.length, 2);
+    assert.equal(
+      thumbnails[0].getAttribute("src"),
+      "https://cdn.shopify.com/shirt.png",
+    );
+    assert.equal(thumbnails[1].getAttribute("src"), null);
+    assert.equal(thumbnails[1].getAttribute("alt"), "No product image");
+
+    assert.match(document.body.textContent, /Out of stock/);
+    assert.match(document.body.textContent, /Not tracked/);
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+  }
+});
+
+test("SyncSummary evaluates supported sources and dashboard reflects isUpToDate freshness", async () => {
+  const { dom, root } = setup();
+  const healthyOverview = {
+    shopTimeZone: "UTC",
+    isUpToDate: true,
+    sources: [
+      {
+        id: "products",
+        name: "Products & Variants",
+        supported: true,
+        status: "healthy",
+        syncType: "automatic",
+        lastFullSyncAt: "2026-10-01T01:02:03.000Z",
+      },
+      {
+        id: "collections",
+        name: "Collections",
+        supported: false,
+        status: "unavailable",
+        syncType: "unavailable",
+        lastFullSyncAt: null,
+      },
+      {
+        id: "inventory",
+        name: "Inventory Levels",
+        supported: false,
+        status: "unavailable",
+        syncType: "unavailable",
+        lastFullSyncAt: null,
+      },
+      {
+        id: "metafields",
+        name: "Metafield Definitions",
+        supported: false,
+        status: "unavailable",
+        syncType: "unavailable",
+        lastFullSyncAt: null,
+      },
+    ],
+  };
+
+  const unhealthyOverview = {
+    ...healthyOverview,
+    isUpToDate: false,
+    sources: [
+      {
+        ...healthyOverview.sources[0],
+        status: "failed",
+      },
+      ...healthyOverview.sources.slice(1),
+    ],
+  };
+
+  try {
+    // 1. Render SyncSummary with healthy supported source
+    await act(async () =>
+      root.render(
+        React.createElement(components.SyncSummary, {
+          overview: healthyOverview,
+          loading: false,
+        }),
+      ),
+    );
+    assert.match(document.body.textContent, /All systems operational/);
+    assert.ok(document.querySelector(".sd-tone--green"));
+
+    // 2. Render SyncSummary with failed supported source
+    await act(async () =>
+      root.render(
+        React.createElement(components.SyncSummary, {
+          overview: unhealthyOverview,
+          loading: false,
+        }),
+      ),
+    );
+    assert.match(document.body.textContent, /Needs attention/);
   } finally {
     await act(async () => root.unmount());
     dom.window.close();
@@ -311,6 +459,120 @@ test("catalog contract errors show a working manual Try again action", async () 
   } finally {
     await act(async () => root.unmount());
     globalThis.fetch = original;
+    dom.window.close();
+  }
+});
+
+
+test("HistoryDetailDialog gates demo note on isDemo or operation.isDemo", async () => {
+  const { dom, root } = setup();
+  const liveOp = {
+    id: "op-live-1",
+    title: "Live bulk edit",
+    type: "Edit",
+    status: "Completed",
+    processed: 100,
+    total: 100,
+    startedLabel: "Oct 31 at 12:00 PM",
+    duration: "45s",
+    user: "Merchant Admin",
+  };
+  try {
+    await act(async () =>
+      root.render(
+        React.createElement(components.HistoryDetailDialog, {
+          operation: liveOp,
+          isDemo: false,
+          onClose: () => {},
+        })
+      )
+    );
+    assert.match(document.body.textContent, /Live bulk edit/);
+    assert.doesNotMatch(document.body.textContent, /This is a demo record/);
+
+    await act(async () =>
+      root.render(
+        React.createElement(components.HistoryDetailDialog, {
+          operation: { ...liveOp, isDemo: true },
+          isDemo: true,
+          onClose: () => {},
+        })
+      )
+    );
+    assert.match(document.body.textContent, /This is a demo record/);
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+  }
+});
+
+test("HistoryActionMenu hides Retry operation when operation is not retryable", async () => {
+  const { dom, root } = setup();
+  const unretryable = {
+    id: "op-failed-1",
+    title: "Failed job",
+    status: "Failed",
+  };
+  let retried = false;
+  try {
+    await act(async () =>
+      root.render(
+        React.createElement(components.HistoryActionMenu, {
+          item: unretryable,
+          onRetry: () => { retried = true; },
+        })
+      )
+    );
+    const buttons = [...document.querySelectorAll("s-button")];
+    assert.ok(!buttons.some((b) => b.textContent?.includes("Retry operation")));
+
+    await act(async () =>
+      root.render(
+        React.createElement(components.HistoryActionMenu, {
+          item: { ...unretryable, retryable: true },
+          onRetry: () => { retried = true; },
+        })
+      )
+    );
+    const retryButton = [...document.querySelectorAll("s-button")].find(
+      (b) => b.textContent?.includes("Retry operation")
+    );
+    assert.ok(retryButton);
+    await act(async () => retryButton.click());
+    assert.equal(retried, true);
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+  }
+});
+
+test("SyncSourcesTable displays 'Refresh catalog mirror' instead of 'Refresh all'", async () => {
+  const { dom, root } = setup();
+  let refreshedAll = false;
+  try {
+    await act(async () =>
+      root.render(
+        React.createElement(components.SyncSourcesTable, {
+          sources: [{ id: "products", name: "Products", status: "healthy", syncType: "automatic" }],
+          totalCount: 1,
+          timeZone: "UTC",
+          search: "",
+          onSearchChange: () => {},
+          loading: false,
+          busyKeys: [],
+          onRefreshSource: () => {},
+          onRefreshAll: () => { refreshedAll = true; },
+        })
+      )
+    );
+    const buttons = [...document.querySelectorAll("s-button")];
+    const refreshMirrorBtn = buttons.find((b) => b.textContent?.includes("Refresh catalog mirror"));
+    assert.ok(refreshMirrorBtn, "Expected 'Refresh catalog mirror' button to exist");
+    assert.ok(!buttons.some((b) => b.textContent === "Refresh all"), "Did not expect 'Refresh all' button");
+    await act(async () => refreshMirrorBtn.click());
+    assert.equal(refreshedAll, true);
+  } finally {
+    await act(async () => root.unmount());
     dom.window.close();
   }
 });

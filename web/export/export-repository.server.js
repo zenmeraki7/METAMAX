@@ -1,3 +1,4 @@
+import {lockPublication} from "../mirror/publication-lock.server.js";
 /**
  * METAMAX Export Engine — PostgreSQL Repository (v2).
  *
@@ -146,9 +147,7 @@ function createManifestRepository({
     job,
     { renewLease = false, readLeaseSeconds = defaultReadLeaseSeconds } = {},
   ) {
-    await client.query(
-      'LOCK TABLE "mirror"."publications" IN ACCESS SHARE MODE',
-    );
+    await lockPublication(client,job.shop_id);
 
     if (job.manifest && typeof job.manifest === "object") {
       if (
@@ -316,6 +315,7 @@ function createManifestRepository({
   }
 
   return Object.freeze({
+    storageContract:'mirror.export_manifest_jobs.compatibility',
     async getJob({ shopId, installationId, jobId } = {}) {
       return withTransaction(async (client) => {
         const res = await client.query(
@@ -492,9 +492,7 @@ function createManifestRepository({
         }
 
         // 3. Acquire publication barrier protection in ACCESS SHARE mode
-        await client.query(
-          'LOCK TABLE "mirror"."publications" IN ACCESS SHARE MODE',
-        );
+        await lockPublication(client,shopId);
 
         // 4. Verify active tenant installation
         const shopRes = await client.query(

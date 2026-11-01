@@ -11,7 +11,7 @@
  * a parameterized WHERE predicate from allowlisted source columns.
  */
 import { parseFilterAst, inspectFilterAst } from "./ast.js";
-import { normalizeOperatorOperand, NORMALIZE_CONTRACT_VERSION } from "../fields/normalize.js";
+import { normalizeOperatorOperand, NORMALIZE_CONTRACT_VERSION, APPROVED_SAME_ROW_COMPARISONS } from "../fields/normalize.js";
 import { CONSTRAINTS_VERSION } from "../fields/constraints.js";
 import { FieldError, FIELD_ERROR_CODES as C, isPlainObject, FIELD_TYPES as T } from "../fields/types.js";
 import { createFilterResolver } from "./resolver.js";
@@ -149,6 +149,31 @@ function compileSql(ast, resolution, filterFingerprint, fields = new Map(resolut
     }
     // Preserve SQL UNKNOWN for null operands/columns. Do not coalesce a leaf
     // to false: NOT would then turn missing/null values into matches.
+    if (value && typeof value === "object" && value.kind === "field") {
+      const isApproved = APPROVED_SAME_ROW_COMPARISONS.some(
+        c => c.left === node.field && c.operator === node.operator && c.right === value.field
+      );
+      if (!isApproved) {
+        throw new FieldError(C.UNSUPPORTED_OPERATION, "Unsupported field-to-field comparison", {
+          fieldId: node.field, targetFieldId: value.field, operator: node.operator,
+        });
+      }
+      const targetMapping = mappings.get(value.field);
+      if (!targetMapping) {
+        throw new FieldError(C.UNSUPPORTED_OPERATION, "Target field mapping not available", { fieldId: value.field });
+      }
+      if (targetMapping.binding.correlation !== binding.correlation) {
+        throw new FieldError(C.UNSUPPORTED_OPERATION, "Cross-resource field comparison is not supported");
+      }
+      if (targetMapping.type !== type) {
+        throw new FieldError(C.CONTRACT_MISMATCH, "Incompatible field comparison storage types");
+      }
+      estimatedCost += targetMapping.binding.cost;
+      if (!Object.hasOwn(SQL_COMPARISONS, node.operator)) {
+        throw new FieldError(C.UNSUPPORTED_OPERATION, "Operator does not support field comparison", { operator: node.operator });
+      }
+      return `(${column} ${SQL_COMPARISONS[node.operator]} ${targetMapping.column})`;
+    }
     if (Object.hasOwn(SQL_COMPARISONS, node.operator)) {
       return `(${column} ${SQL_COMPARISONS[node.operator]} ${parameter(value, type)})`;
     }
@@ -195,6 +220,7 @@ function compileSql(ast, resolution, filterFingerprint, fields = new Map(resolut
       `${identifier(v.alias)}.${identifier(v.shopColumn)} = $1::text AND ` +
       `${identifier(v.alias)}.${identifier(v.generationColumn)} = $2::text AND ` +
       `${identifier(v.alias)}.${identifier(v.productIdColumn)} = ${identifier(p.alias)}.${identifier(p.idColumn)} AND ` +
+      `${identifier(v.alias)}."deleted_at" IS NULL AND ` +
       `${nodes.map(predicate).join(" AND ")}))`;
   }
   function correlated(node) {

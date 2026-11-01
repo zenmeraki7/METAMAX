@@ -307,7 +307,7 @@ export function createFilterCompiler({
       const predicate = await service.compileFilter(contract, {
         authContext: options.authContext,
       });
-      if (options.catalog !== undefined && options.catalog !== true)
+      if (options.catalog !== undefined && ![true,"status","count"].includes(options.catalog))
         throw new FieldError(C.INVALID_VALUE, "Invalid catalog projection");
       let catalog = null;
       if (options.catalog) {
@@ -407,9 +407,14 @@ export function createFilterCompiler({
       }
       parameters.push(pageSize + 1);
       types.push("integer");
+      if (options.catalog === "status" || options.catalog === "count") {
+        if (options.cursor !== undefined) throw new FieldError(C.INVALID_VALUE,"Metadata and count queries do not accept cursors");
+        parameters.splice(0,parameters.length,...predicate.values);
+        types.splice(0,types.length,...predicate.parameterTypes);
+      }
       const values = Object.freeze(parameters);
       assertSqlParameters(values, types, L.MAX_SQL_PARAMETERS);
-      const text =
+      const text = options.catalog === "status" ? "SELECT 1" : options.catalog === "count" ? catalog.countText :
         `SELECT ${id} AS product_id FROM ${quoteQualifiedTable(physical.products.schema, physical.products.table)} AS ${alias} ` +
         `WHERE ${predicate.text}${cursorClause} ORDER BY ${ordering} ASC LIMIT $${values.length}::integer`;
       if (Buffer.byteLength(text, "utf8") > 65536)
@@ -429,7 +434,7 @@ export function createFilterCompiler({
         : resolutionPlan.datasets;
       const result = Object.freeze({
         version: FILTER_COMPILER_VERSION,
-        kind: catalog ? "catalog_product_ids" : "product_ids",
+        kind: options.catalog === "status" ? "catalog_status" : options.catalog === "count" ? "catalog_count" : catalog ? "catalog_product_ids" : "product_ids",
         text,
         values,
         parameterCount: values.length,

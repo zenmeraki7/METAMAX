@@ -644,6 +644,15 @@ function inspectTrustedAst(
     if (node.kind === K.CONDITION) {
       conditionCount++;
       fieldIds.add(node.field);
+      if (
+        node.value !== null &&
+        typeof node.value === "object" &&
+        node.value.kind === "field" &&
+        typeof node.value.field === "string" &&
+        isSupportedFieldId(node.value.field)
+      ) {
+        fieldIds.add(node.value.field);
+      }
       continue;
     }
 

@@ -12,8 +12,19 @@ import {
   createDynamicFieldPolicy,
 } from "./constraints.js";
 
+test("UNLISTED has the same canonical read, filter, and write domain as the installed API", () => {
+  const field=requireCanonicalField('product.status');
+  for(const context of [P.READ,P.FILTER,P.WRITE]) {
+    const constraints=getFieldConstraints(field.id,context);
+    assert.equal(normalizeFieldValue(field,'UNLISTED',{constraints}),'UNLISTED');
+    assert.throws(()=>normalizeFieldValue(field,'UNKNOWN',{constraints}),{code:C.INVALID_VALUE});
+  }
+  assert.equal(normalizeOperatorOperand(field,'eq','UNLISTED',{hasValue:true,constraints:getFieldConstraints(field.id,P.FILTER)}),'UNLISTED');
+  assert.equal(normalizeWriteOperand(field.id,O.SET,'UNLISTED'),'UNLISTED');
+});
+
 test("versioned constraint registry covers every canonical field and is immutable", () => {
-  assert.equal(CONSTRAINTS_VERSION, 3);
+  assert.equal(CONSTRAINTS_VERSION, 5);
   assert.equal(assertFieldConstraintRegistry(), true);
   assert.equal(FIELD_CONSTRAINT_REGISTRY_INFO.fieldCount, Object.keys(CANONICAL_FIELDS).length);
   assert.ok(Object.isFrozen(FIELD_CONSTRAINT_REGISTRY));

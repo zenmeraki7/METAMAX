@@ -293,7 +293,7 @@ async function withTransaction(pool, work) {
     await client.query("SET LOCAL lock_timeout = '2000ms'");
     await client.query("SET LOCAL statement_timeout = '10000ms'");
     // Mirror writers use this same barrier before any row locks.
-    await client.query("LOCK TABLE mirror.publications IN ACCESS EXCLUSIVE MODE");
+    await client.query("LOCK TABLE mirror.publications IN ACCESS SHARE MODE");
     const result = await work(client);
 
     await client.query("COMMIT");
@@ -2403,11 +2403,11 @@ export function createExportLifecycleRepository({
     renewGenerationProtection, releaseGenerationProtection,
     renewPendingGenerationProtection, releaseTerminalGenerationProtections,
   };
-  return Object.freeze(Object.fromEntries(Object.entries(api).map(([name, method]) => [name, async args => {
+  return Object.freeze({storageContract:'export_engine.v2',...Object.fromEntries(Object.entries(api).map(([name, method]) => [name, async args => {
     try { return encode(await method(args)); }
     catch (error) {
       if (error instanceof ExportContractError) throw error;
       fail(C.EXECUTION_FAILED, "Export operation failed", ["40001", "40P01", "55P03", "08006", "ECONNRESET"].includes(error?.code));
     }
-  }])));
+  }]))});
 }

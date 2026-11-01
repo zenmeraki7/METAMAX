@@ -1,3 +1,5 @@
+import {requireInstalledWriteCapability,WRITE_CAPABILITY_VERSION} from '../fields/write-capabilities.js';
+import {CANONICAL_FIELDS} from '../fields/canonical.js';
 /**
  * METAMAX Field Authorization Service
  *
@@ -12,6 +14,7 @@
  */
 import { FieldError, FIELD_ERROR_CODES as C } from "../fields/types.js";
 import { FIELD_SOURCES } from "../fields/sources.js";
+import {assertInstallationTenant} from '../security/installation-lifecycle.server.js';
 
 const SHOP_REGEX = /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/;
 
@@ -54,13 +57,14 @@ export function createFieldAuthorizationService({
   database,
   sessionStorage,
   resolveShop,
+  resolveTenant,
   allowedOperations = null,
   getShopScopes = null,
   defaultScopes = null,
 } = {}) {
-  if (typeof database?.query !== "function" || typeof resolveShop !== "function" ||
+  if (typeof resolveTenant !== 'function' || typeof resolveShop !== "function" ||
       typeof getShopScopes !== "function" || defaultScopes !== null || sessionStorage !== undefined) {
-    throw new TypeError("Merchant field authorization requires installed-shop storage, verified identity and a trusted current-scope resolver; scope defaults and session objects are unsupported");
+    throw new TypeError("Merchant field authorization requires normalized tenant authority, verified identity and a trusted current-scope resolver; scope defaults and session objects are unsupported");
   }
   const operationsAllowlist = allowedOperations ? new Set(allowedOperations) : null;
 
@@ -127,20 +131,9 @@ export function createFieldAuthorizationService({
         }
       }
 
-      // 2. Installed Status (mirror.shops)
-      if (database && typeof database.query === "function") {
-        try {
-          const { rows } = await database.query(
-            `SELECT id, uninstalled_at FROM mirror.shops WHERE id = $1`,
-            [shopId]
-          );
-          if (rows.length === 0 || rows[0].uninstalled_at !== null) {
-            return false;
-          }
-        } catch {
-          return false;
-        }
-      }
+      let tenant;
+      try{tenant=assertInstallationTenant(await resolveTenant(authContext));if(tenant.shopId!==shopId)return false;}catch{return false;}
+      if(executionContext?.installationVersion!==undefined&&executionContext.installationVersion!==tenant.installationVersion)return false;
 
       // 3. Intended Operation Validation
       if (typeof operation !== "string" || operation.length === 0) {
@@ -183,7 +176,9 @@ export function createFieldAuthorizationService({
         if (field.readOnly === true || field.editable === false) {
           return false;
         }
-        if (!source.mutationAdapterId || typeof source.mutationAdapterId !== "string") {
+        if(FIELD_SOURCES[field.id]===source&&CANONICAL_FIELDS[field.id]===field&&source.kind==='column'){
+          try{requireInstalledWriteCapability(field.id,executionContext.writeOperation??'set',executionContext.writeCapabilityVersion??WRITE_CAPABILITY_VERSION);}catch{return false;}
+        }else if (!source.mutationAdapterId || typeof source.mutationAdapterId !== "string") {
           return false;
         }
       }
@@ -230,7 +225,7 @@ export function createFieldAuthorizationService({
         }
       }
 
-      return true;
+      try{const current=assertInstallationTenant(await resolveTenant(authContext));return current.shopId===tenant.shopId&&current.installationVersion===tenant.installationVersion;}catch{return false;}
     },
   });
 }

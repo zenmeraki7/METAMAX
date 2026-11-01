@@ -20,6 +20,7 @@ model CatalogImportJob {
 
   @@unique([shopId, id, generationId], map: "catalog_import_execution_identity")
   @@index([status, nextAttemptAt, leaseUntil], map: "catalog_import_due")
+  @@index([shopId,installationVersion,createdAt,id],map:"catalog_import_installation_history")
   @@map("catalog_import_jobs")
   @@schema("mirror")
 }

@@ -1,6 +1,7 @@
 // METAMAX synchronization domain. Loaded together through prisma.config.mjs.
 
 model SyncRun {
+  catalogDownload CatalogDownload?
   id               BigInt                  @id @default(autoincrement())
   shopId           String                  @map("shop_id") @db.Text
   generationId     String                  @map("generation_id") @db.Text

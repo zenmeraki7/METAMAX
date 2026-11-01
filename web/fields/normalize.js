@@ -36,6 +36,7 @@ import {
 import {
   assertOperatorCompatible,
   assertOperatorOperandShape,
+  isStructuredFieldReference,
   OPERATOR_VALUE_SHAPES as S,
   MAX_OPERATOR_SET_SIZE,
   MAX_OPERATOR_STRING_LENGTH,
@@ -45,7 +46,7 @@ import {
 // 1. CONTRACT AND LIMITS
 // ==================================================
 
-export const NORMALIZE_CONTRACT_VERSION = 1;
+export const NORMALIZE_CONTRACT_VERSION = 2;
 
 export const NORMALIZE_LIMITS = Object.freeze({
   maxStringLength: 4096,
@@ -56,6 +57,12 @@ export const NORMALIZE_LIMITS = Object.freeze({
   maxDecimalLength: 256,
   maxTimestampLength: 40,
 });
+
+export const APPROVED_SAME_ROW_COMPARISONS = Object.freeze([
+  Object.freeze({ left: "variant.price", operator: "lt", right: "variant.compareAtPrice" }),
+  Object.freeze({ left: "variant.price", operator: "eq", right: "variant.compareAtPrice" }),
+  Object.freeze({ left: "variant.price", operator: "gt", right: "variant.compareAtPrice" }),
+]);
 
 const OWN = (object, key) =>
   Object.hasOwn(object, key);
@@ -823,6 +830,18 @@ function decimalToComparable(value, scale) {
 }
 
 function compareCanonicalValues(a, b, type) {
+  if (type === T.INTEGER) {
+    if (!Number.isSafeInteger(a) || !Number.isSafeInteger(b)) {
+      throw new TypeError("Canonical integer range required");
+    }
+    return a < b ? -1 : a > b ? 1 : 0;
+  }
+  if (typeof a !== "string" || typeof b !== "string") {
+    throw new TypeError(
+      "Unsupported canonical range comparison"
+    );
+  }
+
   if (DECIMAL_TYPES.has(type)) {
     const fractionA =
       (a.split(".")[1] ?? "").length;
@@ -842,7 +861,6 @@ function compareCanonicalValues(a, b, type) {
   }
 
   if (
-    type === T.INTEGER ||
     type === T.DATE ||
     type === T.DATETIME
   ) {
@@ -897,6 +915,16 @@ export function normalizeOperatorOperand(
     return undefined;
   }
 
+  if (isStructuredFieldReference(value)) {
+    const isApproved = APPROVED_SAME_ROW_COMPARISONS.some(
+      (c) => c.left === resolved.id && c.operator === operatorId && c.right === value.field
+    );
+    if (!isApproved) {
+      fail(resolved, "Unsupported field comparison");
+    }
+    return Object.freeze({ kind: "field", field: value.field });
+  }
+
   const limits = resolveConstraints(
     resolved,
     constraints
@@ -917,6 +945,13 @@ export function normalizeOperatorOperand(
       value.length > MAX_OPERATOR_STRING_LENGTH
     ) {
       fail(resolved, "Operator operand too long");
+    }
+
+    if (operandType === T.INTEGER) {
+      if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+        fail(resolved, "Expected safe integer");
+      }
+      return Object.is(value, -0) ? 0 : value;
     }
 
     return normalizeScalar(
@@ -945,6 +980,10 @@ export function normalizeOperatorOperand(
       : MAX_OPERATOR_SET_SIZE,
     resolved
   );
+
+  if (operator.valueShape === S.PAIR && items.length !== 2) {
+    fail(resolved, "Expected exactly two range boundaries");
+  }
 
   const normalized =
     items.map(normalizeOperand);

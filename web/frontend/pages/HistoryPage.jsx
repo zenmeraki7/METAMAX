@@ -9,11 +9,10 @@ import useHistoryPagination from "../hooks/useHistoryPagination.js";
 import useHistorySelection from "../hooks/useHistorySelection.js";
 import useHistoryOperations from "../hooks/useHistoryOperations.js";
 import useShopifyToast from "../hooks/useShopifyToast.js";
-import { demoHistory } from "../data/history.demo.js";
 import { downloadHistoryCsv } from "../utils/historyCsv.js";
 import { routes } from "../config/routes.js";
 export default function HistoryPage() {
-  const { operations, isLive, loading, refetch } = useHistoryOperations();
+  const { operations, isDemo, loading, loadingMore, hasNextPage, loadMore, error, refetch } = useHistoryOperations();
   const filters = useHistoryFilters(operations);
   const pagination = useHistoryPagination(filters.filtered);
   const selection = useHistorySelection(pagination.pageRecords);
@@ -35,27 +34,26 @@ export default function HistoryPage() {
     }
   };
   const handleRetry = (operation) => {
-    notify(isLive ? `Retrying ${operation.title}...` : `Demo mode: ${operation.title} was not retried.`);
+    notify(isDemo ? `Demo mode: ${operation.title} was not retried.` : "Retry is not available from history yet.");
   };
   const handleExport = () => {
     downloadHistoryCsv(filters.filtered);
-    notify(isLive ? "Filtered history CSV downloaded." : "Demo history CSV downloaded.");
+    notify(isDemo ? "Demo history CSV downloaded." : "Loaded filtered history CSV downloaded.");
   };
   const handleHelp = () => {
     helpDialogRef.current?.showOverlay();
   };
   return (
     <s-page heading="History">
-      {isLive ? (
-        <s-banner tone="success">Connected to live operation history.</s-banner>
-      ) : (
-        <s-banner tone="info">This history contains example operations. Run a bulk edit to see live entries.</s-banner>
-      )}
+      {isDemo ? <s-banner tone="info">Demo mode: this history contains example operations.</s-banner>
+        : error ? <s-banner tone="critical">{error}<s-button onClick={refetch}>Try again</s-button></s-banner>
+        : loading ? <s-banner tone="info">Loading operation history…</s-banner>
+        : <s-banner tone="success">Connected to live operation history.</s-banner>}
       <s-button slot="primary-action" variant="primary" href={routes.bulkEdit}>
         New edit
       </s-button>
-      <s-button slot="secondary-actions" icon="download" onClick={handleExport}>
-        Export filtered history
+      <s-button slot="secondary-actions" icon="download" onClick={handleExport} disabled={loading || Boolean(error) || !filters.filtered.length}>
+        Export loaded filtered history
       </s-button>
       <s-button
         slot="secondary-actions"
@@ -79,7 +77,7 @@ export default function HistoryPage() {
 
           <HistoryFilters filters={filters} />
 
-          <HistoryStats operations={demoHistory} />
+          <HistoryStats operations={operations} />
 
           {selection.selectedCount > 0 && (
             <s-stack
@@ -92,7 +90,7 @@ export default function HistoryPage() {
 
               <s-button
                 onClick={() => {
-                  const records = demoHistory.filter((item) =>
+                  const records = filters.filtered.filter((item) =>
                     selection.selectedIds.has(item.id),
                   );
                   downloadHistoryCsv(records, "metamax-selected-history.csv");
@@ -116,10 +114,13 @@ export default function HistoryPage() {
             onCopy={handleCopy}
             onRetry={handleRetry}
           />
+          <s-text color="subdued">Search, statistics and exports cover {operations.length} loaded operations.</s-text>
+          {hasNextPage && <s-button onClick={loadMore} disabled={loading || loadingMore} loading={loadingMore}>Load older operations</s-button>}
         </s-stack>
 
         <HistoryDetailDialog
           operation={selectedOperation}
+          isDemo={isDemo}
           onClose={() => setSelectedOperation(null)}
         />
 
@@ -139,8 +140,8 @@ export default function HistoryPage() {
           </s-paragraph>
 
           <s-paragraph>
-            This demonstration uses local records. Production history should
-            come from the backend's persistent job history.
+            Statistics and CSV exports use the loaded history records. Use the
+            filters to narrow the records included in an export.
           </s-paragraph>
 
           <s-button

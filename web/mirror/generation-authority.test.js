@@ -8,7 +8,7 @@ const shopId = "test-store.myshopify.com";
 function createMockDbStore() {
   const store = {
     shops: new Map([
-      [shopId, { id: shopId, uninstalled_at: null }],
+      [shopId, { id: shopId, uninstalled_at: null,installation_version:"install-1" }],
     ]),
     ingestionRuns: new Map(),
     jobCommands: new Map(),
@@ -94,6 +94,43 @@ test("generation authority: merchant session authentication resolves shopId and 
   });
   assert.equal(authVerify.shopId, shopId);
 
+  // Forged session object not in sessionStorage is rejected
+  await assert.rejects(
+    () => authority.authorize({
+      action: "verify",
+      context: {
+        session: {
+          id: "forged-id",
+          shop: "victim-shop.myshopify.com",
+          accessToken: "shp_fake_token",
+        },
+      },
+    }),
+    (err) => err instanceof GenerationServiceError && err.code === "PERMISSION_DENIED",
+  );
+
+  // Supplied session mismatching sessionStorage is rejected
+  await assert.rejects(
+    () => authority.authorize({
+      action: "verify",
+      context: {
+        sessionId: "sess-valid",
+        session: {
+          id: "sess-valid",
+          shop: "victim-shop.myshopify.com",
+          accessToken: "shp_valid_token",
+        },
+      },
+    }),
+    (err) => err instanceof GenerationServiceError && err.code === "PERMISSION_DENIED",
+  );
+
+  // Missing session ID fails closed
+  await assert.rejects(
+    () => authority.authorize({ action: "verify", context: {} }),
+    (err) => err instanceof GenerationServiceError && err.code === "PERMISSION_DENIED",
+  );
+
   // Expired session fails closed
   await assert.rejects(
     () => authority.authorize({ action: "verify", context: { sessionId: "sess-expired" } }),
@@ -126,6 +163,7 @@ test("generation authority: publisher authority resolves fence from durable data
     action: "publish",
     context: {
       workerClaim: {
+        installationVersion:'install-1',
         shopId,
         workerId: "worker-1",
         generationId: "gen-1",
@@ -144,6 +182,7 @@ test("generation authority: publisher authority resolves fence from durable data
         action: "publish",
         context: {
           workerClaim: {
+        installationVersion:'install-1',
             shopId,
             workerId: "worker-1",
             generationId: "gen-1",
@@ -171,6 +210,7 @@ test("generation authority: cleanup authority resolves fence from durable databa
     action: "claimCleanup",
     context: {
       workerClaim: {
+        installationVersion:'install-1',
         shopId,
         workerId: "cleaner-1",
         leaseToken: "lease-clean-456",
@@ -190,4 +230,52 @@ test("generation authority: cleanup authority resolves fence from durable databa
       }),
     (err) => err instanceof GenerationServiceError && err.code === "PERMISSION_DENIED",
   );
+});
+
+const workerActions = ['publish','claimCleanup','finishCleanup','verify','retain','release'];
+const candidateClaim = {installationVersion:"install-1",shopId,workerId:'worker-1',leaseToken:'caller-token',generationId:'gen-1',fence:'999'};
+
+test('generation authority: no worker action accepts a database-free claim, even with a fence',async()=>{
+  const authority=createGenerationAuthorityProvider();
+  for(const action of workerActions)for(const key of ['workerClaim','claim']){
+    await assert.rejects(()=>authority.authorize({action,context:{[key]:candidateClaim}}),
+      {code:'PERMISSION_DENIED'},`${action} via ${key}`);
+  }
+});
+
+test('generation authority: caller fences cannot replace missing or expired durable leases',async()=>{
+  const {store,database}=createMockDbStore();
+  const authority=createGenerationAuthorityProvider({database});
+  for(const expired of [false,true]){
+    if(expired){
+      const record={shop_id:shopId,generation_id:'gen-1',lease_token:'caller-token',lease_until:new Date(Date.now()-1000),fence:999n};
+      store.ingestionRuns.set('expired',record);store.jobCommands.set('expired',record);
+    }
+    for(const action of workerActions)await assert.rejects(
+      ()=>authority.authorize({action,context:{workerClaim:candidateClaim}}),{code:'PERMISSION_DENIED'},action);
+  }
+});
+
+test('generation authority: all ingestion worker actions require a matching durable lease',async()=>{
+  const {store,database}=createMockDbStore();
+  store.ingestionRuns.set('run',{shop_id:shopId,generation_id:'gen-1',lease_token:'caller-token',lease_until:new Date(Date.now()+60000),fence:42n});
+  const authority=createGenerationAuthorityProvider({database});
+  for(const action of ['publish','verify','retain','release']){
+    const result=await authority.authorize({action,context:{workerClaim:candidateClaim}});
+    assert.equal(result.shopId,shopId);assert.equal(result.installationVersion,'install-1');assert.equal(result.publisherFence,action==='publish'?'42':undefined);
+    for(const override of [{shopId:'other.myshopify.com'},{generationId:'other'},{leaseToken:'other'}])await assert.rejects(
+      ()=>authority.authorize({action,context:{workerClaim:{...candidateClaim,...override}}}),{code:'PERMISSION_DENIED'});
+  }
+});
+
+test('generation authority: storage failures propagate and release the connection without trusting the claim',async()=>{
+  for(const action of workerActions){
+    let released=0;const failure=new Error('storage unavailable');
+    const database={async connect(){return {async query(){throw failure;},release(){released++;}};}};
+    const authority=createGenerationAuthorityProvider({database});
+    await assert.rejects(()=>authority.authorize({action,context:{workerClaim:candidateClaim}}),error=>error===failure);
+    assert.equal(released,1);
+    const unavailable=createGenerationAuthorityProvider({database:{async connect(){throw failure;}}});
+    await assert.rejects(()=>unavailable.authorize({action,context:{workerClaim:candidateClaim}}),error=>error===failure);
+  }
 });

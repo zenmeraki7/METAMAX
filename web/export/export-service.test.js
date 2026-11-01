@@ -244,14 +244,18 @@ test("createExportRouter enforces auth, rate limits by authenticated shop (ignor
     filterService: engines.filterService,
     rateLimiter,
     repository: {
+      async findByIdempotencyKey({shopId,installationId,idempotencyKey}) {
+        return ledger.get(JSON.stringify([shopId,installationId,idempotencyKey]))??null;
+      },
       async createOrGet({
         shopId,
+        installationId,
         idempotencyKey,
         requestFingerprint,
         manifestFingerprint,
         state,
       }) {
-        const compositeKey = `${shopId}:${idempotencyKey}`;
+        const compositeKey = JSON.stringify([shopId,installationId,idempotencyKey]);
         if (ledger.has(compositeKey)) {
           return { created: false, job: ledger.get(compositeKey) };
         }
@@ -305,6 +309,8 @@ test("createExportRouter enforces auth, rate limits by authenticated shop (ignor
     assert.equal(body1.data.shopId, "alpha.myshopify.com");
     assert.equal(rateLimitKeys[0].shopId, "alpha.myshopify.com");
 
+    assert.equal(rateLimitKeys.length,1);
+    allowRate=false;
     // 2. Idempotent replay with identical payload returns 200 and same job
     const res2 = await fetch(baseUrl, {
       method: "POST",
@@ -320,6 +326,7 @@ test("createExportRouter enforces auth, rate limits by authenticated shop (ignor
     assert.equal(res2.status, 200);
     const body2 = await res2.json();
     assert.equal(body2.data.id, body1.data.id);
+    assert.equal(rateLimitKeys.length,1,"replay bypasses exhausted admission limiter");
 
     // 3. Idempotent key reuse with different payload returns 409 EXPORT_IDEMPOTENCY_CONFLICT
     const resConflict = await fetch(baseUrl, {
@@ -354,6 +361,7 @@ test("createExportRouter enforces auth, rate limits by authenticated shop (ignor
     });
 
     assert.equal(resRate.status, 429);
+    assert.equal(rateLimitKeys.length,2,"only new admission attempts consume tokens");
     const rateBody = await resRate.json();
     assert.equal(rateBody.error.code, EXPORT_ERROR_CODES.RATE_LIMITED);
     assert.equal(rateBody.error.retryable, true);
@@ -787,3 +795,51 @@ test("immutable requests do not guarantee immutable catalog data: publication ve
 
 
 
+
+test('persistent idempotency results are never retained in a process-local map',async t=>{
+ const engines=createMockEngines(),commits=[];
+ const original=Map.prototype.set;
+ t.mock.method(Map.prototype,'set',function(key,value){
+  if(typeof key==='string'&&key.includes('export:memory-'))commits.push(key);
+  return original.call(this,key,value);
+ });
+ let existing=null,lookups=0;
+ const service=createExportService({resolveShop:async()=>shop,resolveExecutionContext:async()=>executionContext,
+  fieldService:engines.fieldService,filterService:engines.filterService,repository:{
+   async findByIdempotencyKey(){lookups++;return existing;},
+   async createOrGet(input){existing={id:'persisted',requestFingerprint:input.requestFingerprint};return {created:true,job:existing};}
+  }});
+ const input={authContext:{shop},input:{fieldIds:['product.title']},idempotencyKey:'export:memory-persistent'};
+ await service.create(input);assert.equal((await service.create(input)).created,false);
+ assert.equal(lookups,2);assert.deepEqual(commits,[]);
+});
+
+test('legacy replay hints expire and evict while atomic repository idempotency remains authoritative',async t=>{
+ const engines=createMockEngines();let calls=0;
+ const service=createExportService({resolveShop:async()=>shop,resolveExecutionContext:async()=>executionContext,
+  fieldService:engines.fieldService,filterService:engines.filterService,repository:{async createOrGet(input){
+   calls++;return {created:true,job:{id:input.idempotencyKey,requestFingerprint:input.requestFingerprint}};
+  }}});
+ const create=key=>service.create({authContext:{shop},input:{fieldIds:['product.title']},idempotencyKey:`export:memory-${key}`});
+ await create('first');await create('first');assert.equal(calls,1);
+ const now=Date.now();t.mock.method(Date,'now',()=>now+60001);
+ await create('first');assert.equal(calls,2,'expired hints consult the repository');
+ for(let i=0;i<1000;i++)await create(String(i));
+ await create('first');assert.equal(calls,1003,'capacity eviction consults the repository');
+});
+
+test('HTTP router rejects a separate admission limiter before it can charge a request',()=>{
+ let consumed=0;
+ assert.throws(()=>createExportRouter({authenticate:async()=>({}),exportService:{async create(){assert.fail('No request');}},
+  rateLimiter:{async consume(){consumed++;return false;}}}),/Export Service, not the HTTP router/);
+ assert.equal(consumed,0);
+});
+
+test('legacy artifact and production admission factories have distinct module contracts',async()=>{
+ const legacy=await import('../services/export.server.js');
+ assert.equal(typeof legacy.createLegacyArtifactExportService,'function');
+ assert.equal(Object.hasOwn(legacy,'createExportService'),false);
+ assert.equal(typeof createExportService,'function');
+ assert.throws(()=>createExportService({}),/atomic repository/);
+ assert.throws(()=>legacy.createLegacyArtifactExportService({}),/authenticated publication/);
+});

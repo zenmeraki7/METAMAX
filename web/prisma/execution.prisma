@@ -10,6 +10,8 @@ enum ApprovalStatus {
 }
 
 model SelectionSnapshot {
+  installationVersion String? @map("installation_version") @db.Text
+  targetMode String? @map("target_mode") @db.Text
   importPreviews ImportPreview[]
   exportJobs ExportJob[]
   scheduleOccurrences ScheduleOccurrence[]

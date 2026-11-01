@@ -11,8 +11,8 @@ import pg from "pg";
 const cwd = fileURLToPath(new URL("../", import.meta.url));
 const temporaryRoot = await realpath(tmpdir());
 const arguments_ = process.argv.slice(2);
-if (arguments_.some(value => !["--schema","--operations","--exports","--history","--history-upgrade"].includes(value)) || arguments_.length > 1) throw new Error("Unknown isolated test option");
-const testFile = arguments_.some(value => ["--history","--history-upgrade"].includes(value)) ? "edit-history/integration/schema-v2.test.js" : arguments_.includes("--exports") ? "export/integration/postgres.test.js" : arguments_.includes("--operations") ? "prisma/operation-dispatch.test.js" : arguments_.includes("--schema") ? "prisma/schema.test.js" : "filters/integration/postgres.test.js";
+if (arguments_.some(value => !["--schema","--operations","--exports","--history","--history-upgrade","--phase1"].includes(value)) || arguments_.length > 1) throw new Error("Unknown isolated test option");
+const testFile = arguments_.includes("--phase1") ? "filters/integration/phase1-postgres.test.js" : arguments_.some(value => ["--history","--history-upgrade"].includes(value)) ? "edit-history/integration/schema-v2.test.js" : arguments_.includes("--exports") ? "export/integration/postgres.test.js" : arguments_.includes("--operations") ? "prisma/operation-dispatch.test.js" : arguments_.includes("--schema") ? "prisma/schema.test.js" : "filters/integration/postgres.test.js";
 let container;
 let cluster, pgCtl, started = false;
 function command(executable, args, timeout = 60000) {

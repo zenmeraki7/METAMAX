@@ -201,11 +201,12 @@ export async function testSyncDbAdapter(t, pool) {
     assert.equal((await repo.recordStep({claim:c,result:{kind:"COMPLETE"}})).kind,"RECORDED");assert.equal(await claim(runId),null);
   });
 
-  await t.test("the existing coarse publication barrier is acquired before shop/run locks and blocks cross-shop writers",async()=>{
+  await t.test("shop publication locks block same-shop writers while allowing other shops",async()=>{
     const blocker=await pool.connect();try{
-      await blocker.query("BEGIN");await blocker.query("LOCK TABLE mirror.publications IN ACCESS SHARE MODE");
+      await blocker.query("BEGIN");await blocker.query("SELECT pg_advisory_xact_lock_shared(hashtextextended($1::text,581834147::bigint))",[shops[0]]);
       const limited=createSyncRunDbAdapter({database:pool,mapping,verifyShop,verifyStepEvidence,verifyPublished,lockTimeoutMs:100});
-      await assert.rejects(()=>limited.transaction(async tx=>{await tx.lockShop(shops[1]);}),{code:"55P03"});
+      await limited.transaction(async tx=>{await tx.lockShop(shops[1]);});
+      await assert.rejects(()=>limited.transaction(async tx=>{await tx.lockShop(shops[0]);}),{code:"55P03"});
     }finally{await blocker.query("ROLLBACK");blocker.release();}
     await assert.rejects(()=>db.transaction(tx=>tx.lockRun("anything")),{code:"LOCK_ORDER"});
   });

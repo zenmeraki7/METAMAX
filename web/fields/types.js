@@ -691,7 +691,7 @@ const ERROR_CODE_SET = new Set(
 export function isValidFieldId(value) {
   return (
     typeof value === "string" &&
-    Buffer.byteLength(value, "utf8") <= FIELD_ID_LIMITS.MAX_BYTES &&
+    new TextEncoder().encode(value).length <= FIELD_ID_LIMITS.MAX_BYTES &&
     STRUCTURAL_FIELD_ID_PATTERN.test(value)
   );
 }
@@ -711,7 +711,7 @@ export function hasUnpairedSurrogate(value) {
 
 /** Legacy-compatible supported syntax; neither existence nor authorization. */
 export function isSupportedFieldId(value) {
-  return typeof value === "string" && Buffer.byteLength(value, "utf8") <= FIELD_ID_LIMITS.MAX_BYTES &&
+  return typeof value === "string" && new TextEncoder().encode(value).length <= FIELD_ID_LIMITS.MAX_BYTES &&
     !hasUnpairedSurrogate(value) && (isCanonicalFieldId(value) || DYNAMIC_FIELD_ID_PATTERN.test(value));
 }
 

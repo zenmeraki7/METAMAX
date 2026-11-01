@@ -1,4 +1,7 @@
 import { createHmac,timingSafeEqual } from 'node:crypto';
+// Cursor signing intentionally uses one private key per deployment. Rotating it
+// rejects old cursors with HISTORY_INVALID_INPUT; restart from the first page.
+// All replicas must use the same key. Cursor validity is never authorization.
 import { canonicalHistoryJson,normalizeHistoryPageSize,HistoryContractError,HISTORY_ERROR_CODES as C } from './history-contract.js';
 import { createHistoryHookInvoker } from './transaction-hooks.server.js';
 const fail=(code,message)=>{throw new HistoryContractError(code,message);};
@@ -20,7 +23,7 @@ export function createHistoryPages({database,executionAdapter,resolveTenant,auth
   input(raw,['authContext','operationId','limit','cursor']);
   if(!raw.authContext||typeof authorizeHistoryRead!=='function')fail(C.UNAUTHORIZED,'Independent history read authorization required');
   if(!key||key.length<32)fail(C.UNAUTHORIZED,'A private cursor signing key of at least 32 bytes is required');
-  if(action==='list_changes'&&!uuid(raw.operationId))fail(C.INVALID_INPUT,'History operation UUID required');
+  if(['list_changes','read_operation'].includes(action)&&!uuid(raw.operationId))fail(C.INVALID_INPUT,'History operation UUID required');
   if(action==='list_operations'&&raw.operationId!==undefined)fail(C.INVALID_INPUT,'Operation overrides are not supported for operation pages');
   const limit=normalizeHistoryPageSize(raw.limit),authContext=raw.authContext,operationId=raw.operationId??null;
   const tx=await database.connect(),invoke=createHistoryHookInvoker(tx);
@@ -30,10 +33,17 @@ export function createHistoryPages({database,executionAdapter,resolveTenant,auth
    const context={shopId:tenant.shopId,installationId:tenant.installationId,action,operationId};
    const cursor=raw.cursor==null?null:decode(raw.cursor,context);
    let operation=null;
-   if(operationId){const row=(await tx.query(`SELECT * FROM edit_history.operations WHERE shop_id=$1 AND installation_id=$2 AND id=$3`,[tenant.shopId,tenant.installationId,operationId])).rows[0];if(!row||row.purge_requested_at!=null){await tx.query('COMMIT');return Object.freeze({items:Object.freeze([]),nextCursor:null});}operation=operationRecord(row);}
+   if(operationId){const row=(await tx.query(`SELECT * FROM edit_history.operations WHERE shop_id=$1 AND installation_id=$2 AND id=$3`,[tenant.shopId,tenant.installationId,operationId])).rows[0];if(!row||row.purge_requested_at!=null){await tx.query('COMMIT');return action==='read_operation'?null:Object.freeze({items:Object.freeze([]),nextCursor:null});}operation=operationRecord(row);}
    const request=Object.freeze({...(operationId?{operationId}:{}),limit});
    const authorize=()=>invoke(authorizeHistoryRead,{authContext,tenant,operation:action,operationRecord:operation,request});
    if(await authorize()!==true)fail(C.UNAUTHORIZED,'History page read is not authorized');
+   if(action==='read_operation'){
+    if(raw.cursor!=null)fail(C.INVALID_INPUT,'Operation detail does not accept a cursor');
+    if(await authorize()!==true)fail(C.UNAUTHORIZED,'History page permission changed');
+    const current=canonicalHistoryJson(await invoke(resolveTenant,{authContext}));
+    if(current.shopId!==tenant.shopId||current.installationId!==tenant.installationId)fail(C.UNAUTHORIZED,'History page tenant changed');
+    await tx.query('COMMIT');return operation;
+   }
    const asOf=cursor?.asOf??(await tx.query(`SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS instant`)).rows[0].instant;
    const table=action==='list_operations'?'operations':'changes',column=action==='list_operations'?'created_at':'prepared_at';
    const params=[tenant.shopId,tenant.installationId,asOf,cursor?.lastTime??null,cursor?.lastId??null,limit+1];
@@ -50,5 +60,5 @@ export function createHistoryPages({database,executionAdapter,resolveTenant,auth
    await tx.query('COMMIT');return Object.freeze({items:Object.freeze(items),nextCursor});
   }catch(error){await tx.query('ROLLBACK').catch(()=>{});throw error;}finally{tx.release();}
  }
- return Object.freeze({listOperations:raw=>page(raw,'list_operations'),listChanges:raw=>page(raw,'list_changes')});
+ return Object.freeze({listOperations:raw=>page(raw,'list_operations'),listChanges:raw=>page(raw,'list_changes'),getOperation:raw=>page(raw,'read_operation')});
 }

@@ -1,0 +1,35 @@
+model CatalogDownload {
+  shopId String @map("shop_id") @db.Text
+  runId BigInt @map("run_id")
+  generationId String @map("generation_id") @db.Text
+  operationId String @map("operation_id") @db.Text
+  urlHash String @map("url_hash") @db.Text
+  etag String @db.Text
+  totalBytes BigInt @map("total_bytes")
+  nextByte BigInt @default(0) @map("next_byte")
+  lineCount BigInt @default(0) @map("line_count")
+  pending Bytes @default(dbgenerated("''::bytea"))
+  complete Boolean @default(false)
+  generation MirrorGeneration @relation(fields:[shopId,generationId],references:[shopId,id],onDelete:Cascade)
+  run SyncRun @relation(fields:[shopId,runId],references:[shopId,id],onDelete:Cascade)
+  chunks CatalogDownloadChunk[]
+  @@id([shopId,runId])
+  @@map("catalog_downloads")
+  @@schema("mirror")
+}
+model CatalogDownloadChunk {
+  shopId String @map("shop_id") @db.Text
+  runId BigInt @map("run_id")
+  byteStart BigInt @map("byte_start")
+  byteEnd BigInt @map("byte_end")
+  lineStart BigInt @map("line_start")
+  lineCount Int @map("line_count")
+  lines Json @db.JsonB
+  checksum String @db.Text
+  sourceChecksum String @map("source_checksum") @db.Text
+  download CatalogDownload @relation(fields:[shopId,runId],references:[shopId,runId],onDelete:Cascade)
+  @@id([shopId,runId,byteStart])
+  @@index([shopId,runId,lineStart],map:"catalog_download_line_seek")
+  @@map("catalog_download_chunks")
+  @@schema("mirror")
+}

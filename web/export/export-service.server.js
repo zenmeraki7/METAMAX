@@ -877,6 +877,13 @@ export async function prepareExportRequest({
 /**
  * Creates the server-side Export Service supporting rate-limited,
  * idempotent export job creation bound to the authenticated shop.
+ * Input: opaque authContext, normalized export input and idempotency key.
+ * Output: {created,job}; authority/lifecycle: current tenant and installation,
+ * approved fields/filter and protected publication enforced before admission.
+ * Durable effect: repository atomically creates or returns a tenant/key job.
+ * Persistent lookup bypasses admission limits for replays. Legacy replay hints
+ * expire after 60 seconds and retain at most 1,000 committed entries per service;
+ * eviction never replaces repository conflict checking or authorizes execution.
  */
 export function createExportService({
   resolveShop,
@@ -896,10 +903,12 @@ export function createExportService({
     );
   }
 
-  // Track committed idempotent outcomes so a repeated idempotent request
-  // returns the existing job without consuming another rate-limit token or
-  // reserving another execution slot.
-  const committedIdempotencyIndex = new Map();
+  // Persistent lookup is authoritative and retains no process-local results.
+  // Legacy atomic repositories get only a bounded, short-lived replay hint;
+  // createOrGet remains responsible for durable conflict detection after eviction.
+  const persistentLookup = typeof repository.findByIdempotencyKey === "function";
+  const committedIdempotencyIndex = persistentLookup ? null : new Map();
+  const replayCapacity = 1000, replayTtlMs = 60000;
 
   return Object.freeze({
     async create({ authContext, input, idempotencyKey } = {}) {
@@ -929,9 +938,9 @@ export function createExportService({
       const normalizedRequest = normalizeExportRequest(input);
       const normalizedKey = normalizeIdempotencyKey(idempotencyKey);
       const requestFingerprint = exportRequestFingerprint(normalizedRequest);
-      const idempotencyScopeKey = `${authenticatedShop.id}:${authenticatedShop.installationId}:${normalizedKey}`;
+      const idempotencyScopeKey = JSON.stringify([authenticatedShop.id, authenticatedShop.installationId, normalizedKey]);
 
-      if (typeof repository.findByIdempotencyKey === "function") {
+      if (persistentLookup) {
         const existingJob = await repository.findByIdempotencyKey({
           shopId: authenticatedShop.id,
           installationId: authenticatedShop.installationId,
@@ -952,18 +961,23 @@ export function createExportService({
             job: repository.createPreparedJob ? publicExecutionJob(existingJob) : existingJob,
           });
         }
-      } else if (committedIdempotencyIndex.has(idempotencyScopeKey)) {
-        const cached = committedIdempotencyIndex.get(idempotencyScopeKey);
-        if (cached.requestFingerprint !== requestFingerprint) {
-          throw new ExportContractError(
-            EXPORT_ERROR_CODES.IDEMPOTENCY_CONFLICT,
-            "Idempotency key already used with different export request parameters",
-          );
+      } else {
+        for (const [key, value] of committedIdempotencyIndex) {
+          if (value.expiresAt <= Date.now()) committedIdempotencyIndex.delete(key);
         }
-        return Object.freeze({
-          created: false,
-          job: cached.job,
-        });
+        const cached = committedIdempotencyIndex.get(idempotencyScopeKey);
+        if (cached) {
+          if (cached.requestFingerprint !== requestFingerprint) {
+            throw new ExportContractError(
+              EXPORT_ERROR_CODES.IDEMPOTENCY_CONFLICT,
+              "Idempotency key already used with different export request parameters",
+            );
+          }
+          return Object.freeze({
+            created: false,
+            job: cached.job,
+          });
+        }
       }
 
       // Rate limit strictly by server-authenticated shop identity, never headers,
@@ -1036,10 +1050,17 @@ export function createExportService({
         );
       }
 
-      committedIdempotencyIndex.set(idempotencyScopeKey, {
-        requestFingerprint: prepared.requestFingerprint,
-        job: repository.createPreparedJob ? publicExecutionJob(outcome.job) : outcome.job,
-      });
+      if (committedIdempotencyIndex) {
+        committedIdempotencyIndex.delete(idempotencyScopeKey);
+        while (committedIdempotencyIndex.size >= replayCapacity) {
+          committedIdempotencyIndex.delete(committedIdempotencyIndex.keys().next().value);
+        }
+        committedIdempotencyIndex.set(idempotencyScopeKey, {
+          requestFingerprint: prepared.requestFingerprint,
+          job: repository.createPreparedJob ? publicExecutionJob(outcome.job) : outcome.job,
+          expiresAt: Date.now() + replayTtlMs,
+        });
+      }
 
       return Object.freeze({
         created: outcome.created,

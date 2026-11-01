@@ -1,3 +1,7 @@
+import {bindExecutionCoordinates,executionAuthorityRecord} from '../../services/execution-contract.server.js';
+import {readApprovalCoordinates} from '../../services/approval-coordinates.server.js';
+import {WRITE_CAPABILITY_VERSION} from '../../fields/write-capabilities.js';
+import {createRestrictedRuntimeProfiles} from '../../security/test-support/restricted-runtime.js';
 import assert from 'node:assert/strict';
 import { randomUUID,createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
@@ -25,7 +29,8 @@ export async function testJournalRepository(t, adminPool) {
   await adminPool.query('GRANT metamax_history_runtime TO history_fixture_runtime');
   const url=new URL(process.env.FILTER_TEST_DATABASE_URL);url.username='history_fixture_runtime';url.password=password;
   const runtimePool=new pg.Pool({connectionString:url.toString()});
-  const pool={query:(...args)=>adminPool.query(...args),connect:()=>runtimePool.connect(),adminConnect:()=>adminPool.connect(),runtimePool};
+  const profiles=await createRestrictedRuntimeProfiles(adminPool,process.env.FILTER_TEST_DATABASE_URL);
+  const pool={query:(...args)=>adminPool.query(...args),connect:()=>runtimePool.connect(),adminConnect:()=>adminPool.connect(),runtimePool,...profiles};
   try{
   await pool.query(`CREATE SCHEMA history_test_authority;
     CREATE TABLE history_test_authority.plans(shop_id text,installation_id text,operation_id uuid,mutation_id text,
@@ -36,21 +41,26 @@ export async function testJournalRepository(t, adminPool) {
       PRIMARY KEY(shop_id,installation_id,evidence_id));`);
   await adminPool.query(`ALTER TABLE history_test_authority.plans ADD COLUMN _history_lock integer DEFAULT 0;
     ALTER TABLE history_test_authority.observations ADD COLUMN _history_lock integer DEFAULT 0;
-    GRANT USAGE ON SCHEMA history_test_authority TO metamax_history_runtime;
+    GRANT USAGE ON SCHEMA history_test_authority TO metamax_history_runtime,metamax_operation_worker;
+    GRANT SELECT,UPDATE(_history_lock) ON history_test_authority.plans TO metamax_operation_worker;
     GRANT SELECT ON ALL TABLES IN SCHEMA history_test_authority TO metamax_history_runtime;
     GRANT UPDATE(_history_lock) ON history_test_authority.plans,history_test_authority.observations TO metamax_history_runtime;`);
   async function fixture(options = {}) {
     const operationId = randomUUID(), mutationId = randomUUID(), installationId = options.tenant?.installationId??randomUUID();
     const shopId = options.tenant?.shopId??`journal-${randomUUID()}.myshopify.com`, authContext = Object.freeze({ session: randomUUID() });
-    const contractId = randomUUID(), generationId = randomUUID(), selectionId = randomUUID();
+    const contractId = randomUUID(), selectionId = randomUUID();
     const kind=options.kind??'bulk_edit',inverse=kind==='undo';
     const writes=inverse?{title:'Before',vendor:'Old Vendor'}:{title:'After',vendor:'Vendor'};
     const q = (text, values) => pool.query(text, values);
     if(!options.tenant)await q('INSERT INTO mirror.shops(id,installation_version) VALUES($1,$2)', [shopId,installationId]);
+    const published=options.tenant?(await q('SELECT generation_id FROM mirror.publications WHERE shop_id=$1',[shopId])).rows[0]:null;
+    const generationId=published?.generation_id??randomUUID(),resource='gid://shopify/Product/1';
+    let product;
+    if(published)product=(await q('SELECT id FROM mirror.products WHERE shop_id=$1 AND generation_id=$2 AND shopify_id=$3',[shopId,generationId,resource])).rows[0].id;
+    else {
     await q(`INSERT INTO mirror.generations(shop_id,id,coverage_revision,mirror_schema_version,source_contract_version,mapping_version,required_datasets)
       VALUES($1,$2,'coverage-1','mirror_v1','sources_v1','physical-mapping-1',ARRAY['products'])`, [shopId,generationId]);
-    const resource = 'gid://shopify/Product/1';
-    const product = (await q(`INSERT INTO mirror.products(shop_id,generation_id,shopify_id,title,handle,status,created_at,updated_at)
+    product = (await q(`INSERT INTO mirror.products(shop_id,generation_id,shopify_id,title,handle,status,created_at,updated_at)
       VALUES($1,$2,$3,'Before','product-1','ACTIVE',now(),now()) RETURNING id`, [shopId,generationId,resource])).rows[0].id;
     if (options.extraProduct) await q(`INSERT INTO mirror.products(shop_id,generation_id,shopify_id,title,handle,status,created_at,updated_at)
       VALUES($1,$2,'gid://shopify/Product/2','Unselected','product-2','ACTIVE',now(),now())`,[shopId,generationId]);
@@ -62,13 +72,16 @@ export async function testJournalRepository(t, adminPool) {
     await q("UPDATE mirror.generations SET status='RECONCILING' WHERE shop_id=$1 AND id=$2", [shopId,generationId]);
     await q("UPDATE mirror.generations SET status='VERIFIED',verified_at=now() WHERE shop_id=$1 AND id=$2", [shopId,generationId]);
     await q("UPDATE mirror.generations SET status='PUBLISHED',published_at=now() WHERE shop_id=$1 AND id=$2", [shopId,generationId]);
+    await q(`INSERT INTO mirror.publications(shop_id,generation_id,coverage_revision,mapping_version) VALUES($1,$2,'coverage-1','physical-mapping-1')`,[shopId,generationId]);
+    }
     await q(`INSERT INTO mirror.selection_snapshots(shop_id,id,generation_id,coverage_revision,mapping_version,operation,operation_id,
       filter_ast,filter_fingerprint,registry_version,definition_revisions,expires_at)
       VALUES($1,$2,$3,'coverage-1','physical-mapping-1',$6,$4,'{}',$5,'registry-1','[]',now()+interval '2 hours')`,
     [shopId,selectionId,generationId,operationId,digest(2).slice(7),kind]);
     await q(`INSERT INTO mirror.selection_items(shop_id,snapshot_id,generation_id,product_id) VALUES($1,$2,$3,$4)`, [shopId,selectionId,generationId,product]);
     await q("UPDATE mirror.selection_snapshots SET status='APPROVED',selected_count=1,selection_hash='hash',frozen_at=now() WHERE shop_id=$1 AND id=$2", [shopId,selectionId]);
-    const approvalContext = { shopId,snapshotId: selectionId,operation:kind,contract:inverse?{sourceCommandId:options.sourceCommandId,fields:['title','vendor'],...(options.historyUndoBinding?{historyUndo:options.historyUndoBinding}:{})}:{updates:writes},selectionHash: 'hash',approvedBy: 'merchant' };
+    const approvalContext = { shopId,snapshotId: selectionId,operation:kind,contract:inverse?{writeCapabilityVersion:'product-set-v1',sourceCommandId:options.sourceCommandId,fields:['title','vendor'],...(options.historyUndoBinding?{historyUndo:options.historyUndoBinding}:{})}:kind==='import'?{writeCapabilityVersion:WRITE_CAPABILITY_VERSION,resourceType:'product',importMappingVersion:1,rowCount:1,rows:[{resourceGid:resource,fields:{'product.title':writes.title,'product.vendor':writes.vendor}}],fieldIds:['product.title','product.vendor']}:{writeCapabilityVersion:'product-set-v1',updates:writes},selectionHash: 'hash',approvedBy: 'merchant' };
+    approvalContext.contract={...approvalContext.contract,approvalSchemaVersion:1,writeCapabilityVersion:WRITE_CAPABILITY_VERSION,executionCoordinates:bindExecutionCoordinates({coordinates:(await readApprovalCoordinates({client:{query:q},shopId,snapshotId:selectionId})).coordinates,payload:approvalContext.contract,approvalRevision:'approval-1'})};
     const approvedHash = computeContractHash(approvalContext);
     await q(`INSERT INTO mirror.execution_contracts(shop_id,id,snapshot_id,operation,approval_revision,contract,contract_hash,hash_version,canonical_contract,expires_at)
       VALUES($1,$2,$3,$8,'approval-1',$4,$5,'canonical-v2',$6,$7)`,
@@ -83,7 +96,7 @@ export async function testJournalRepository(t, adminPool) {
     const claim = { fenceEpoch: '9007199254740993', executionClaimId: 'engine-claim-1', leaseToken: 'secret-lease' };
     const entries = ['product.title','product.vendor'].map((fieldId, index) => {
       const identity = { shopId,installationId,executionJobId: command,executionItemId: item,mutationId,resourceGid: resource,fieldId };
-      const binding = { mode: 'MIRROR_PINNED',executionFingerprint: digest(1),filterFingerprint: digest(2),fieldResolutionFingerprint: digest(3),
+      const binding = { mode: 'MIRROR_PINNED',executionFingerprint: digest(1),filterFingerprint: digest(2),fieldResolutionFingerprint: approvalContext.contract.executionCoordinates.fieldResolutionFingerprint,
         fieldDefinitionRevision: 'registry-1',generationId,coverageRevision: 'coverage-1',mappingVersion: 'engine-mapping-1' };
       const beforeSnapshot = normalizeHistorySnapshot({ identity,binding,kind: 'BEFORE',valueKind: 'VALUE',value: inverse?(index?'Vendor':'After'):(index ? 'Old Vendor' : 'Before'),
         observation: { observationId: randomUUID(),source: 'MIRROR_PINNED',observedAt: startedAt,resourceGid: resource,fieldId,
@@ -93,8 +106,8 @@ export async function testJournalRepository(t, adminPool) {
       const attempt = normalizeMutationAttempt({ identity,attemptId,attemptNumber: 1,fenceEpoch: claim.fenceEpoch,executionClaimId: claim.executionClaimId,startedAt });
       return { beforeSnapshot,intent,attempt,resourceFamilyGid: resource };
     });
-    const plan = { shopId,installationId,operationId,mutationId,executionJobId: command,editOperationId: edit,executionContractId: contractId,
-      operationKind: inverse?'UNDO':'BULK_EDIT',executionFingerprint: digest(1),filterFingerprint: digest(2),fieldResolutionFingerprint: digest(3),
+    const plan = { executionAuthority:executionAuthorityRecord({shop_id:shopId,snapshot_id:selectionId,operation:kind,approval_revision:'approval-1',contract_hash:approvedHash},approvalContext.contract.executionCoordinates),shopId,installationId,operationId,mutationId,executionJobId: command,editOperationId: edit,executionContractId: contractId,
+      operationKind: inverse?'UNDO':kind==='import'?'IMPORT':'BULK_EDIT',executionFingerprint: digest(1),filterFingerprint: digest(2),fieldResolutionFingerprint: approvalContext.contract.executionCoordinates.fieldResolutionFingerprint,
       targetingSnapshotId: selectionId,logicalOperationId: operationId,approvalRevision: 'approval-1',
       itemIntendedValues:writes,
       approvedContractFingerprint: `sha256:${approvedHash}`,mutationPlanFingerprint: digest(6),attemptId,attemptNumber: 1,
@@ -458,5 +471,5 @@ export async function testJournalRepository(t, adminPool) {
   await testRepositoryAuthority(t,fixture,pool);
   await testWorkerExecution(t,fixture,pool);
   await testHistorySecurity(t,fixture,pool,adminPool);
-  }finally{await runtimePool.end();}
+  }finally{await runtimePool.end();await profiles.close();}
 }

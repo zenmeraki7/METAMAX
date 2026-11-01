@@ -1,3 +1,4 @@
+import {hasCurrentProductRead} from '../middleware/product-permission.server.js';
 import { randomUUID } from "node:crypto";
 import { createSyncRunService } from "../mirror/sync-run-service.server.js";
 import { createIngestionWriter } from "../mirror/ingestion-writer.server.js";
@@ -6,15 +7,15 @@ import { createReconciliationService } from "../mirror/reconciliation-service.se
 import { transaction, invalid, shop } from "../mirror/transactions.server.js";
 import { createShopifyCatalogClient, readCompleteProduct, openBulkExport } from "../mirror/shopify-catalog-source.server.js";
 import { catalogImportProgress } from "./catalog-import-progress.server.js";
-import { isValidShopifySession } from "../middleware/shopify-auth.js";
+import { isValidShopifySession } from "../middleware/session-validation.js";
 import { CatalogImportError, IMPORT_ERROR_CODES as C, withImportErrors } from "./catalog-import-errors.server.js";
 import { requireCatalogImportId } from "./catalog-import-id.server.js";
 
 function requireImportSession(session, shopId) {
-  if (!isValidShopifySession(session, { requireCredentials: true }) || session.shop !== shopId) {
+  if (!isValidShopifySession(session) || session.shop !== shopId) {
     throw new CatalogImportError(C.UNAUTHENTICATED);
   }
-  if (!String(session.scope ?? "").split(",").some(scope => ["read_products", "write_products"].includes(scope.trim()))) {
+  if (!hasCurrentProductRead(session)) {
     throw new CatalogImportError(C.FORBIDDEN);
   }
   return session;
@@ -23,6 +24,7 @@ function requireImportSession(session, shopId) {
 const publicJob = row => row && Object.freeze({ id: row.id, status: row.status, generationId: row.generation_id,
   attempts: row.execution_attempt ?? row.attempts, cancelRequested: row.cancel_requested,
   cancelPending: Boolean(row.cancel_requested && row.status !== "CANCELLED" && row.status !== "SUCCEEDED"),
+  ...(row.cancel_requested?{cancellationState:row.status==='CANCELLED'?'CANCELLED':row.last_error==='REMOTE_CANCEL_PENDING'?'CANCELLING':'CANCELLATION_REQUESTED'}:{}),
   retryAt: row.phase ? row.execution_retry_at : row.next_attempt_at, error: row.last_error,
   ...(row.phase ? {phase:row.phase,outcomeUncertain:row.outcome_uncertain,reviewRequired:row.review_required} : {}),
   progress:catalogImportProgress(row) });
@@ -38,7 +40,7 @@ export function createCatalogImportService({ database, shopify, fetchImpl = fetc
   clientFactory = input => createShopifyCatalogClient({ database, shopify, ...input }) }) {
   const sync = createSyncRunService({ database });
   const reconciliation = createReconciliationService({ database });
-  let timer, running, stopping = false, initialScanCursor = "";
+  let timer, running, stopping = false, initialScanCursor = "", refreshScanCursor = "";
   const controllers = new Map();
 
   async function authenticate(session) {
@@ -56,7 +58,7 @@ export function createCatalogImportService({ database, shopify, fetchImpl = fetc
     if (!row) invalid("Import lease, installation or cancellation fence changed");
     return row;
   }
-  async function enqueue(session, { initial = false, activate = false, installationVersion } = {}) {
+  async function enqueue(session, { initial = false, activate = false, installationVersion, refresh = false } = {}) {
     const stored = await authenticate(session);
     if (initial && !activate && !installationVersion) {
       // Status polling usually needs no scheduling transaction. This read is
@@ -64,7 +66,7 @@ export function createCatalogImportService({ database, shopify, fetchImpl = fetc
       const previous = (await database.query(`SELECT j.* FROM mirror.catalog_import_jobs j
         JOIN mirror.shops s ON s.id=j.shop_id AND s.installation_version=j.installation_version
         WHERE j.shop_id=$1 AND s.uninstalled_at IS NULL ORDER BY j.created_at,j.id LIMIT 1`, [stored.shop])).rows[0];
-      if (previous) return publicJob(previous);
+      if (previous) {await authenticate(session);return publicJob(previous);}
     }
     // Reload credentials from storage; never retain an OAuth request/token in a worker closure.
     const offline = (await shopify.config.sessionStorage.findSessionsByShop(stored.shop))
@@ -79,6 +81,7 @@ export function createCatalogImportService({ database, shopify, fetchImpl = fetc
       if (!installationVersion) await client.query("INSERT INTO mirror.shops(id,installation_version) VALUES ($1,$2) ON CONFLICT(id) DO NOTHING", [stored.shop,randomUUID()]);
       let installed = (await client.query("SELECT installation_version,uninstalled_at FROM mirror.shops WHERE id=$1 FOR UPDATE", [stored.shop])).rows[0];
       if (!installed) return null;
+      await authenticate(session);
       if (installationVersion && installed.installation_version !== installationVersion) return null;
       // Only the verified OAuth callback may reactivate an uninstalled tenant.
       if (installed.uninstalled_at !== null && activate) {
@@ -92,6 +95,10 @@ export function createCatalogImportService({ database, shopify, fetchImpl = fetc
         [stored.shop,installed.installation_version]);
       }
       if (installed.uninstalled_at !== null) throw new CatalogImportError(C.FORBIDDEN, { message: "Active installation required" });
+      const refreshRequest = (await client.query(`SELECT requested_revision,scheduled_revision FROM mirror.catalog_refresh_requests
+        WHERE shop_id=$1 AND installation_version=$2 AND requested_revision>scheduled_revision
+          AND attempts<8 AND next_attempt_at<=clock_timestamp() FOR UPDATE`, [stored.shop,installed.installation_version])).rows[0];
+      if (refresh && !refreshRequest) return null;
       if (initial) {
         // Any durable job for this installation is its initial request, including
         // terminal jobs: a repeated callback must not reset exhausted retries.
@@ -109,18 +116,71 @@ export function createCatalogImportService({ database, shopify, fetchImpl = fetc
         if (initial) return null; // The startup scanner retries after old work drains.
         throw new CatalogImportError(C.UNAVAILABLE);
       }
-      if (initial && (await client.query(`SELECT 1 FROM mirror.generations WHERE shop_id=$1
+      if ((initial || refresh) && (await client.query(`SELECT 1 FROM mirror.generations WHERE shop_id=$1
         AND status IN ('INGESTING','RECONCILING','VERIFIED') LIMIT 1`, [stored.shop])).rowCount) return null;
       const current = (await client.query("SELECT generation_id FROM mirror.publications WHERE shop_id=$1", [stored.shop])).rows[0]?.generation_id ?? null;
-      if (phaseRuntime) return publicJob(await phaseRuntime.enqueue({client,shopId:stored.shop,installationVersion:installed.installation_version,expectedGenerationId:current}));
-      return publicJob((await client.query(`INSERT INTO mirror.catalog_import_jobs(id,shop_id,installation_version,expected_generation_id)
-        VALUES ($1,$2,$3,$4) RETURNING *`, [randomUUID(),stored.shop,installed.installation_version,current])).rows[0]);
-    });
+      await authenticate(session);
+      const job = phaseRuntime
+        ? await phaseRuntime.enqueue({client,shopId:stored.shop,installationVersion:installed.installation_version,expectedGenerationId:current})
+        : (await client.query(`INSERT INTO mirror.catalog_import_jobs(id,shop_id,installation_version,expected_generation_id)
+          VALUES ($1,$2,$3,$4) RETURNING *`, [randomUUID(),stored.shop,installed.installation_version,current])).rows[0];
+      if (refreshRequest) await client.query(`UPDATE mirror.catalog_refresh_requests SET scheduled_revision=$3,attempts=0,review_required=false,last_error=NULL,updated_at=clock_timestamp()
+        WHERE shop_id=$1 AND installation_version=$2 AND requested_revision=$3`,
+      [stored.shop,installed.installation_version,refreshRequest.requested_revision]);
+      return publicJob(job);
+    }, stored.shop);
   }
   const service = Object.freeze({
     enqueue: session => enqueue(session),
     onInstall: session => enqueue(session, {initial:true,activate:true}),
     ensureInitialSync: session => enqueue(session, {initial:true}),
+    async ensurePendingCatalogRefreshes() {
+      const exhausted=await database.query(`UPDATE mirror.catalog_refresh_requests SET review_required=true,last_error='REFRESH_RETRY_EXHAUSTED'
+        WHERE shop_id IN(SELECT shop_id FROM mirror.catalog_refresh_requests WHERE requested_revision>scheduled_revision AND attempts>=8 AND NOT review_required
+          ORDER BY shop_id LIMIT 25 FOR UPDATE SKIP LOCKED) RETURNING shop_id,requested_revision`);
+      for(const row of exhausted.rows){try{logger.error?.({code:'REFRESH_RETRY_EXHAUSTED',shopId:row.shop_id,revision:String(row.requested_revision)},'Catalog refresh requires review');}catch{}}
+      const candidates = (await database.query(`SELECT r.shop_id,r.installation_version,r.requested_revision
+        FROM mirror.catalog_refresh_requests r JOIN mirror.shops s ON s.id=r.shop_id
+          AND s.installation_version=r.installation_version AND s.uninstalled_at IS NULL
+        WHERE r.shop_id>$1 AND r.requested_revision>r.scheduled_revision AND r.attempts<8 AND NOT r.review_required
+          AND r.next_attempt_at<=clock_timestamp()
+          AND NOT EXISTS(SELECT 1 FROM mirror.catalog_import_jobs j WHERE j.shop_id=r.shop_id
+            AND (j.status IN ('QUEUED','RUNNING','RETRY') OR j.cancel_requested AND j.status NOT IN ('CANCELLED','SUCCEEDED')))
+          AND NOT EXISTS(SELECT 1 FROM mirror.generations g WHERE g.shop_id=r.shop_id AND g.status IN ('INGESTING','RECONCILING','VERIFIED'))
+        ORDER BY r.shop_id LIMIT 10`, [refreshScanCursor])).rows;
+      refreshScanCursor = candidates.at(-1)?.shop_id ?? "";
+      for (const candidate of candidates) {
+        try {
+          const session = (await shopify.config.sessionStorage.findSessionsByShop(candidate.shop_id))
+            .find(s => s.isOnline === false && s.shop === candidate.shop_id);
+          if (!session) throw new CatalogImportError(C.UNAUTHENTICATED);
+          await enqueue(session, {refresh:true,installationVersion:candidate.installation_version});
+        } catch (error) {
+          // New deliveries reset the budget. A stale scheduler cannot penalize
+          // a new revision or a reinstallation after its credential lookup.
+          const failed=await database.query(`UPDATE mirror.catalog_refresh_requests SET attempts=attempts+1,
+            review_required=attempts+1>=8,last_error='REFRESH_SCHEDULING_FAILED',
+            next_attempt_at=clock_timestamp()+LEAST(3600,5*power(2,attempts))::integer*interval '1 second'
+            WHERE shop_id=$1 AND installation_version=$2 AND requested_revision=$3 AND requested_revision>scheduled_revision AND attempts<8 RETURNING review_required`,
+          [candidate.shop_id,candidate.installation_version,candidate.requested_revision]);
+          try{logger.error?.({code:failed.rows[0]?.review_required?'REFRESH_RETRY_EXHAUSTED':error.code,shopId:candidate.shop_id}, "Catalog refresh scheduling requires retry or review");}catch{}
+        }
+      }
+    },
+    async requeueCatalogRefresh(session,{expectedRevision,reason}={}){
+      if(typeof expectedRevision!=='string'||!/^\d{1,19}$/.test(expectedRevision)||BigInt(expectedRevision)>9223372036854775807n||typeof reason!=='string'||!reason.trim()||reason.length>512)throw new CatalogImportError(C.INVALID_REQUEST);
+      const stored=await authenticate(session);
+      return transaction(database,async client=>{
+        const installed=(await client.query('SELECT installation_version FROM mirror.shops WHERE id=$1 AND uninstalled_at IS NULL FOR SHARE',[stored.shop])).rows[0];
+        const changed=await client.query(`UPDATE mirror.catalog_refresh_requests SET review_required=false,last_error=NULL,attempts=0,next_attempt_at=clock_timestamp()
+          WHERE shop_id=$1 AND installation_version=$2 AND requested_revision=$3 AND requested_revision>scheduled_revision AND review_required RETURNING shop_id`,[stored.shop,installed?.installation_version,expectedRevision]);
+        if(changed.rowCount!==1)throw new CatalogImportError(C.UNAVAILABLE);
+        await authenticate(session);
+        await client.query(`INSERT INTO mirror.audit_events(shop_id,operation_id,action,actor_id,outcome,summary) VALUES($1,$2,'catalog_refresh_requeued','authorized_session','PENDING',$3::jsonb)`,
+          [stored.shop,expectedRevision,JSON.stringify({reason})]);
+        return Object.freeze({requeued:true,revision:expectedRevision});
+      },stored.shop);
+    },
     async ensurePendingInitialSyncs() {
       // Shops are the durable installation intent. Keyset rotation bounds each
       // pass and prevents a shop with unavailable credentials hiding later shops.
@@ -141,8 +201,9 @@ export function createCatalogImportService({ database, shopify, fetchImpl = fetc
     async status(session, id) {
       const stored = await authenticate(session);
       requireCatalogImportId(id);
-      return publicJob((await database.query(`SELECT ${progressColumns} FROM mirror.catalog_import_jobs j ${progressJoins}
+      const result=publicJob((await database.query(`SELECT ${progressColumns} FROM mirror.catalog_import_jobs j ${progressJoins}
         WHERE j.shop_id=$1 AND j.id=$2`, [stored.shop,id])).rows[0]);
+      await authenticate(session);return result;
     },
     async current(session) {
       const stored = await authenticate(session);
@@ -156,14 +217,14 @@ export function createCatalogImportService({ database, shopify, fetchImpl = fetc
         row = (await read()).rows[0];
         if (!row) return publicJob({id:null,status:'QUEUED'});
       }
-      return publicJob(row);
+      await authenticate(session);return publicJob(row);
     },
     async cancel(session, id) {
       const stored = await authenticate(session);
       requireCatalogImportId(id);
-      const result = await transaction(database, async client => (await client.query(`UPDATE mirror.catalog_import_jobs SET cancel_requested=true,
+      const result = await transaction(database, async client => {await authenticate(session);return (await client.query(`UPDATE mirror.catalog_import_jobs SET cancel_requested=true,
         status=CASE WHEN generation_id IS NULL AND status<>'RUNNING' THEN 'CANCELLED' ELSE status END,
-        next_attempt_at=now(),updated_at=now() WHERE shop_id=$1 AND id=$2 AND status IN ('QUEUED','RUNNING','RETRY','FAILED') RETURNING *`, [stored.shop,id])).rows[0]);
+        next_attempt_at=now(),updated_at=now() WHERE shop_id=$1 AND id=$2 AND status IN ('QUEUED','RUNNING','RETRY','FAILED') RETURNING *`, [stored.shop,id])).rows[0];}, stored.shop);
       if (result) controllers.get(id)?.abort();
       return publicJob(result);
     },
@@ -185,11 +246,20 @@ export function createCatalogImportService({ database, shopify, fetchImpl = fetc
         const runner = createBulkOperationRunner({ database, shopifyClient: client, syncRunService: sync,
           ingestionWriter: createIngestionWriter({ syncRunService: sync }) });
         try {
-          if (cancelling.run_id) await runner.cancelBulkCatalogExport({ shopId: cancelling.shop_id, runId: cancelling.run_id });
+          if (cancelling.run_id) {
+            const cleanup=await runner.cancelBulkCatalogExport({shopId:cancelling.shop_id,runId:cancelling.run_id,reconcile:true});
+            if(cleanup?.cancelled!==true){
+              const saved=await database.query(`UPDATE mirror.catalog_import_jobs SET lease_until=NULL,last_error=$4,
+                next_attempt_at=clock_timestamp()+interval '10 seconds',updated_at=now()
+                WHERE id=$1 AND shop_id=$2 AND fence=$3 AND cancel_requested AND lease_until>clock_timestamp()`,
+                [cancelling.id,cancelling.shop_id,cancelling.fence,cleanup?.outcomeUncertain!==false?'REMOTE_CANCEL_OUTCOME_UNKNOWN':'REMOTE_CANCEL_PENDING']);
+              return {id:cancelling.id,status:cancelling.status,cancelPending:true,cancellationState:cleanup?.state??'CANCELLATION_REQUESTED',outcomeUncertain:cleanup?.outcomeUncertain!==false,superseded:saved.rowCount!==1};
+            }
+          }
           else if (cancelling.generation_id) await sync.cancelGeneration({ shopId: cancelling.shop_id, generationId: cancelling.generation_id });
-          await database.query(`UPDATE mirror.catalog_import_jobs SET status='CANCELLED',lease_until=NULL,updated_at=now()
-            WHERE id=$1 AND shop_id=$2 AND fence=$3 AND cancel_requested`, [cancelling.id,cancelling.shop_id,cancelling.fence]);
-          return { id: cancelling.id, status: "CANCELLED" };
+          const completed=await database.query(`UPDATE mirror.catalog_import_jobs SET status='CANCELLED',lease_until=NULL,updated_at=now()
+            WHERE id=$1 AND shop_id=$2 AND fence=$3 AND cancel_requested AND lease_until>clock_timestamp()`, [cancelling.id,cancelling.shop_id,cancelling.fence]);
+          return { id: cancelling.id, status: completed.rowCount===1?"CANCELLED":"SUPERSEDED" };
         } catch (error) {
           logger.error?.({ code: error.code }, "Remote import cancellation requires retry");
           await database.query(`UPDATE mirror.catalog_import_jobs SET lease_until=NULL,
@@ -248,12 +318,15 @@ export function createCatalogImportService({ database, shopify, fetchImpl = fetc
       heartbeat.unref?.();
       try {
         if (job.cancel_requested) {
-          if (job.run_id) await runner.cancelBulkCatalogExport({ shopId: job.shop_id, runId: job.run_id });
+          if (job.run_id) {
+            const cleanup=await runner.cancelBulkCatalogExport({shopId:job.shop_id,runId:job.run_id,reconcile:true});
+            if(cleanup?.cancelled!==true)throw Object.assign(Error('Remote cancellation pending'),{code:cleanup?.outcomeUncertain!==false?'REMOTE_CANCEL_OUTCOME_UNKNOWN':'REMOTE_CANCEL_PENDING'});
+          }
           else if (job.generation_id) await sync.cancelGeneration({ shopId: job.shop_id, generationId: job.generation_id });
-          await database.query("UPDATE mirror.catalog_import_jobs SET status='CANCELLED',lease_until=NULL,updated_at=now() WHERE id=$1 AND fence=$2", [job.id,job.fence]);
-          return { id: job.id, status: "CANCELLED" };
+          const completed=await database.query("UPDATE mirror.catalog_import_jobs SET status='CANCELLED',lease_until=NULL,updated_at=now() WHERE id=$1 AND fence=$2 AND shop_id=$3 AND cancel_requested AND lease_until>clock_timestamp()", [job.id,job.fence,job.shop_id]);
+          return { id: job.id, status: completed.rowCount===1?"CANCELLED":"SUPERSEDED" };
         }
-        await transaction(database, c => owner(c, job));
+        await transaction(database, c => owner(c, job), job.shop_id);
         let generation = job.generation_id ? (await database.query("SELECT status FROM mirror.generations WHERE shop_id=$1 AND id=$2", [job.shop_id,job.generation_id])).rows[0] : null;
         if (!generation || generation.status === "INGESTING") {
           run = await sync.startIngestionRun({ shopId: job.shop_id, workerId });
@@ -262,7 +335,7 @@ export function createCatalogImportService({ database, shopify, fetchImpl = fetc
           await transaction(database, async c => {
             await owner(c, job);
             await c.query("UPDATE mirror.catalog_import_jobs SET generation_id=$3,run_id=$4 WHERE id=$1 AND fence=$2", [job.id,job.fence,run.generationId,run.runId]);
-          });
+          }, job.shop_id);
           await runner.initiateBulkCatalogExport({ shopId: job.shop_id, syncRun: run });
           const op = await runner.bulkSync.monitorBulkOperation({ shopId: job.shop_id, runId: run.runId, signal });
           check();
@@ -286,7 +359,7 @@ export function createCatalogImportService({ database, shopify, fetchImpl = fetc
               check();
               await reconciliation.reconcileLatestProduct({ shopId: job.shop_id, generationId: job.generation_id,
                 productId: row.productId, workerId, signal,
-                fetchProduct: ({ productId }) => readCompleteProduct({ client, productId, signal }) });
+                fetchProduct: ({ productId,signal:productSignal }) => readCompleteProduct({ client, productId, signal:productSignal }) });
             }
           }
         } else if (generation.status !== "VERIFIED") invalid("Import generation cannot be published");
@@ -297,7 +370,7 @@ export function createCatalogImportService({ database, shopify, fetchImpl = fetc
           if (generation.status === "RECONCILING") await sync.completeCoverageAndVerify({ client: c, shopId: job.shop_id, generationId: job.generation_id });
           await sync.publishGeneration({ client: c, shopId: job.shop_id, generationId: job.generation_id, expectedGenerationId: job.expected_generation_id });
           await c.query("UPDATE mirror.catalog_import_jobs SET status='SUCCEEDED',lease_until=NULL,last_error=NULL,updated_at=now() WHERE id=$1 AND fence=$2", [job.id,job.fence]);
-        });
+        }, job.shop_id);
         return { id: job.id, status: "SUCCEEDED", generationId: job.generation_id };
       } catch (error) {
         stoppedByShutdown = stopping;
@@ -309,32 +382,36 @@ export function createCatalogImportService({ database, shopify, fetchImpl = fetc
         }
         const current = (await database.query("SELECT cancel_requested FROM mirror.catalog_import_jobs WHERE id=$1 AND fence=$2 AND status='RUNNING'", [job.id,job.fence])).rows[0];
         if (!current) return { id: job.id, status: "SUPERSEDED" };
-        let cancelPending = false;
+        let cancelPending = false,cancelUncertain = false;
         if (current.cancel_requested) {
           if (job.run_id) {
-            try { await runner.cancelBulkCatalogExport({ shopId: job.shop_id, runId: job.run_id }); }
-            catch (cancelError) { cancelPending = true; logger.error?.({ code: cancelError.code }, "Remote import cancellation requires retry"); }
+            try { const cleanup=await runner.cancelBulkCatalogExport({shopId:job.shop_id,runId:job.run_id,reconcile:true});cancelPending=cleanup?.cancelled!==true;cancelUncertain=cleanup?.outcomeUncertain!==false; }
+            catch (cancelError) { cancelPending = true;cancelUncertain=true; logger.error?.({ code: cancelError.code }, "Remote import cancellation requires retry"); }
           } else if (job.generation_id) await sync.cancelGeneration({ shopId: job.shop_id, generationId: job.generation_id });
         }
         const status = cancelPending ? job.attempts >= 8 ? "FAILED" : "RETRY"
           : current.cancel_requested ? "CANCELLED" : job.attempts >= 8 || error.code === "IMPORT_REMOTE_TERMINAL" ? "FAILED" : "RETRY";
         await database.query(`UPDATE mirror.catalog_import_jobs SET status=$3,lease_until=NULL,last_error=$4,
           next_attempt_at=clock_timestamp()+$5::integer*interval '1 second',updated_at=now() WHERE id=$1 AND fence=$2 AND status='RUNNING'`,
-        [job.id,job.fence,status,stoppedByShutdown ? "Worker shutdown; resume pending" : String(error.message ?? "Import failed").slice(0,1000),Math.min(3600,2 ** job.attempts * 5)]);
-        return { id: job.id, status };
+        [job.id,job.fence,status,cancelPending ? cancelUncertain?"REMOTE_CANCEL_OUTCOME_UNKNOWN":"REMOTE_CANCEL_PENDING" : stoppedByShutdown ? "Worker shutdown; resume pending" : String(error.message ?? "Import failed").slice(0,1000),Math.min(3600,2 ** job.attempts * 5)]);
+        return { id: job.id, status,...(cancelPending?{cancelPending:true,outcomeUncertain:cancelUncertain}:{}) };
       } finally {
         clearInterval(heartbeat);
         controllers.delete(job.id);
       }
     },
-    async verifyStorage() { await database.query("SELECT id,execution_mode FROM mirror.catalog_import_jobs LIMIT 0"); await phaseRuntime?.verifyStorage(); },
+    async verifyStorage() {
+      await database.query("SELECT id,execution_mode FROM mirror.catalog_import_jobs LIMIT 0");
+      await database.query("SELECT shop_id,requested_revision,scheduled_revision,attempts FROM mirror.catalog_refresh_requests LIMIT 0");
+      await phaseRuntime?.verifyStorage();
+    },
     start() {
       if (timer) return;
       stopping = false;
       phaseRuntime?.start();
       const tick = () => {
         if (running || stopping) return;
-        running = service.ensurePendingInitialSyncs().then(() => service.processOne()).catch(error => logger.error?.({ code: error.code }, "Import worker failed"))
+        running = service.ensurePendingInitialSyncs().then(() => service.ensurePendingCatalogRefreshes()).then(() => service.processOne()).catch(error => logger.error?.({ code: error.code }, "Import worker failed"))
           .finally(() => { running = null; });
       };
       timer = setInterval(tick, 2000); timer.unref?.(); tick();

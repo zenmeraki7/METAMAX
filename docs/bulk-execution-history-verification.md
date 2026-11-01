@@ -1,5 +1,7 @@
 # Bulk Execution and Edit History verification
 
+Historical pre-fix findings. See [implemented fixes and current verification](bulk-execution-history-fixes.md).
+
 Verified 2026-10-31 against this checkout. Verdict: **blocked for production
 mutation dispatch and history-backed undo**. Passing repository tests do not
 certify the separate Bulk Execution worker's Shopify send boundary.

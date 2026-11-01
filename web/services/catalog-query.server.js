@@ -1,3 +1,5 @@
+import {getFieldCapability,FIELD_CAPABILITY_VERSIONS} from '../fields/capabilities.js';
+import {getFieldConstraints} from '../fields/constraints.js';
 /**
  * METAMAX — Product Catalog Query Service
  *
@@ -14,6 +16,8 @@ import {
 } from "../fields/types.js";
 import { normalizePageSize } from "../filters/execute.js";
 import { parseFilterAst } from "../filters/ast.js";
+import {getFilterBindingRegistry} from '../filters/bindings.js';
+import {requireCanonicalField} from '../fields/canonical.js';
 import {
   withCoverageTransaction,
   currentCoverageTransaction,
@@ -165,8 +169,8 @@ export function createCatalogQueryService({
 
   const service = Object.freeze({
     // Backend-only unit of work: pages and membership writes share one protected
-    // repeatable-read transaction. No client or shop is accepted from a browser.
-    async withSelectionSnapshot({ authContext, shopId, filter }, callback) {
+    // shop-protected transaction. No client or shop is accepted from a browser.
+    async withSelectionSnapshot({ authContext, shopId, filter, signal }, callback) {
       if (typeof executor.withSnapshot !== "function" || typeof resolveShop !== "function") {
         throw new FieldError(C.EXECUTION_UNAVAILABLE, "Protected catalog selection unavailable");
       }
@@ -174,7 +178,7 @@ export function createCatalogQueryService({
         throw new FieldError(C.PERMISSION_DENIED, "Selection requires the authenticated shop");
       }
       const capturedFilter = parseFilterAst(filter);
-      return executor.withSnapshot({ authContext }, async ({ client, shopId: authenticatedShop }) => {
+      return executor.withSnapshot({ authContext, signal }, async ({ client, shopId: authenticatedShop }) => {
         if (authenticatedShop !== shopId || !client || typeof client.query !== "function") {
           throw new FieldError(C.PERMISSION_DENIED, "Selection shop changed");
         }
@@ -281,6 +285,19 @@ export function createCatalogQueryService({
       };
     },
 
+    async queryCapabilities({authContext}={}) {
+      const registry=getFilterBindingRegistry();
+      const fieldIds=registry.listFieldIds();
+      const context=await resolveDatasets({authContext});
+      // Every advertised field passes the genuine semantic, physical mapping,
+      // coverage and live authorization stages. This metadata grants no access.
+      const validated=await compiler.validateFilter({version:1,root:group('AND',fieldIds.map(id=>condition(id,'is_not_null')))},
+        {authContext,operation:'filter',executionContext:context.executionContext});
+      const query=await compiler.compileFilter(validated,{authContext,catalog:'status',pageSize:1});
+      const result=await executor.execute({query,authContext});
+      return {...FIELD_CAPABILITY_VERSIONS,snapshotId:result.generationId,publishedRevision:result.coverageRevision,
+        fields:fieldIds.map(id=>getFieldCapability(id,{bindingOperators:registry.requireBinding(id).operators}))};
+    },
     async queryStatus({ authContext } = {}) {
       const context = await resolveDatasets({ authContext });
       const validated = await compiler.validateFilter(
@@ -295,7 +312,7 @@ export function createCatalogQueryService({
       const query = await compiler.compileFilter(validated, {
         authContext,
         pageSize: 1,
-        catalog: true,
+        catalog: "status",
       });
 
       const result = await executor.execute({ query, authContext });
@@ -320,7 +337,7 @@ export function createCatalogQueryService({
       const query = await compiler.compileFilter(validated, {
         authContext,
         pageSize: 1,
-        catalog: true,
+        catalog: "count",
       });
 
       const result = await executor.execute({ query, authContext });

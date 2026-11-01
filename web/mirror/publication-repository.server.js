@@ -1,3 +1,5 @@
+import {retireCatalogExecutionHistory} from './catalog-retention.server.js';
+import {lockPublication} from "./publication-lock.server.js";
 /** Current-publication reads and atomic publication for the installed mirror schema. Server use only. */
 import { randomUUID } from "node:crypto";
 import {
@@ -127,10 +129,10 @@ export function createPublicationRepository({ database } = {}) {
     const owned = await database.connect();
     let discard;
     try {
-      await owned.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      await owned.query("BEGIN ISOLATION LEVEL READ COMMITTED READ ONLY");
       await owned.query("SET LOCAL statement_timeout = '5000ms'");
       await owned.query("SET LOCAL lock_timeout = '1000ms'");
-      await owned.query("LOCK TABLE mirror.publications IN ACCESS SHARE MODE");
+      await lockPublication(owned,shopId);
       const result = await read(owned, values);
       await owned.query("COMMIT");
       return result;
@@ -171,7 +173,7 @@ export function createPublicationRepository({ database } = {}) {
       };
       const current = client
         ? await snapshot({ shopId, generationId, datasets: [], client })
-        : await transaction(database, readContext);
+        : await transaction(database, readContext, shopId);
       // A stable operation identity permits paging within this publication.
       // This read context does not grant field access or operation approval.
       return (
@@ -208,7 +210,7 @@ export function createPublicationRepository({ database } = {}) {
       }
 
       async function execute(txClient) {
-        await lockMirror(txClient);
+        await lockMirror(txClient,shopId);
 
         // 1. Verify candidate generation eligibility and lock row
         const genRes = await txClient.query(
@@ -355,7 +357,7 @@ export function createPublicationRepository({ database } = {}) {
         }
         return execute(client);
       }
-      return transaction(database, execute);
+      return transaction(database, execute, shopId);
     },
 
     async acquireReadLease({
@@ -384,6 +386,7 @@ export function createPublicationRepository({ database } = {}) {
       }
 
       async function execute(txClient) {
+        await lockMirror(txClient,shopId);
         const genRes = await txClient.query(
           `SELECT id, coverage_revision, mapping_version, status, retain_until
            FROM mirror.generations
@@ -444,7 +447,7 @@ export function createPublicationRepository({ database } = {}) {
           throw new TypeError("Protected transaction client required");
         return execute(client);
       }
-      return transaction(database, execute);
+      return transaction(database, execute, shopId);
     },
 
     async verifyReadLease({client,shopId,leaseId,generationId,coverageRevision,mappingVersion,owner,operation,allowExpired=false}={}) {
@@ -472,6 +475,7 @@ export function createPublicationRepository({ database } = {}) {
       }
 
       async function execute(txClient) {
+        await lockMirror(txClient,shopId);
         const leaseRes = await txClient.query(
           `UPDATE mirror.generation_read_leases
            SET expires_at = clock_timestamp() + $3::integer * interval '1 second'
@@ -502,13 +506,14 @@ export function createPublicationRepository({ database } = {}) {
           throw new TypeError("Protected transaction client required");
         return execute(client);
       }
-      return transaction(database, execute);
+      return transaction(database, execute, shopId);
     },
 
     async releaseReadLease({ client, shopId, leaseId } = {}) {
       shop(shopId);
       token(leaseId, "Lease ID");
       async function execute(txClient) {
+        await lockMirror(txClient,shopId);
         const res = await txClient.query(
           `DELETE FROM mirror.generation_read_leases WHERE shop_id = $1 AND id = $2 RETURNING id`,
           [shopId, leaseId],
@@ -520,7 +525,7 @@ export function createPublicationRepository({ database } = {}) {
           throw new TypeError("Protected transaction client required");
         return execute(client);
       }
-      return transaction(database, execute);
+      return transaction(database, execute, shopId);
     },
 
     async retainGeneration({ client, shopId, generationId, until } = {}) {
@@ -536,6 +541,7 @@ export function createPublicationRepository({ database } = {}) {
       }
 
       async function execute(txClient) {
+        await lockMirror(txClient,shopId);
         const genRes = await txClient.query(
           `SELECT id, status FROM mirror.generations WHERE shop_id = $1 AND id = $2 FOR UPDATE`,
           [shopId, generationId],
@@ -558,7 +564,7 @@ export function createPublicationRepository({ database } = {}) {
           throw new TypeError("Protected transaction client required");
         return execute(client);
       }
-      return transaction(database, execute);
+      return transaction(database, execute, shopId);
     },
 
     async reclaimGeneration({ client, shopId, generationId } = {}) {
@@ -566,6 +572,8 @@ export function createPublicationRepository({ database } = {}) {
       token(generationId, "Pinned generation");
 
       async function execute(txClient) {
+        await lockMirror(txClient,shopId);
+        await txClient.query("SELECT set_config('app.shop_id',$1,true)",[shopId]);
         const genRes = await txClient.query(
           `SELECT id, status, retain_until FROM mirror.generations WHERE shop_id = $1 AND id = $2 FOR UPDATE`,
           [shopId, generationId],
@@ -579,8 +587,7 @@ export function createPublicationRepository({ database } = {}) {
           );
         }
         if (
-          gen.retain_until &&
-          new Date(gen.retain_until).getTime() > Date.now()
+          !gen.retain_until || new Date(gen.retain_until).getTime() > Date.now()
         ) {
           throw new FieldError(C.CONTRACT_MISMATCH, "Generation is retained");
         }
@@ -606,6 +613,7 @@ export function createPublicationRepository({ database } = {}) {
             [shopId, generationId],
           );
         }
+        if(!await retireCatalogExecutionHistory(txClient,{shopId,generationId}))return false;
         await txClient.query(
           `DELETE FROM mirror.generations WHERE shop_id = $1 AND id = $2`,
           [shopId, generationId],
@@ -618,21 +626,23 @@ export function createPublicationRepository({ database } = {}) {
           throw new TypeError("Protected transaction client required");
         return execute(client);
       }
-      return transaction(database, execute);
+      return transaction(database, execute, shopId);
     },
 
     async cleanupGenerations({ client, shopId } = {}) {
       shop(shopId);
       async function execute(txClient) {
+        await lockMirror(txClient,shopId);
+        await txClient.query("SELECT set_config('app.shop_id',$1,true)",[shopId]);
         const candidateRes = await txClient.query(
           `SELECT g.id, g.status, g.retain_until
            FROM mirror.generations g
            LEFT JOIN mirror.publications p ON p.shop_id = g.shop_id AND p.generation_id = g.id
            WHERE g.shop_id = $1
              AND p.generation_id IS NULL
-             AND (g.retain_until IS NULL OR g.retain_until <= clock_timestamp())
+             AND g.retain_until IS NOT NULL AND g.retain_until <= clock_timestamp()
              AND g.status IN ('FAILED', 'RETIRED', 'PUBLISHED')
-           ORDER BY g.created_at ASC`,
+           ORDER BY g.created_at ASC LIMIT 5 FOR UPDATE OF g SKIP LOCKED`,
           [shopId],
         );
 
@@ -652,6 +662,7 @@ export function createPublicationRepository({ database } = {}) {
                 [shopId, gen.id],
               );
             }
+            if(!await retireCatalogExecutionHistory(txClient,{shopId,generationId:gen.id}))continue;
             await txClient.query(
               `DELETE FROM mirror.generations WHERE shop_id = $1 AND id = $2`,
               [shopId, gen.id],
@@ -667,7 +678,7 @@ export function createPublicationRepository({ database } = {}) {
           throw new TypeError("Protected transaction client required");
         return execute(client);
       }
-      return transaction(database, execute);
+      return transaction(database, execute, shopId);
     },
   });
 }

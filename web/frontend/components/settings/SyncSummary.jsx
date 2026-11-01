@@ -28,9 +28,12 @@ export default function SyncSummary({ overview, loading }) {
   const periodic = sources.filter(
     (source) => source.syncType === "periodic",
   ).length;
+  const supportedSources = sources.filter(
+    (source) => source.supported !== false,
+  );
   const healthy =
-    sources.length > 0 &&
-    sources.every((source) => source.status === "healthy");
+    supportedSources.length > 0 &&
+    supportedSources.every((source) => source.status === "healthy");
   const lastRefreshAt = sources
     .map((source) => source.lastFullSyncAt)
     .filter(Boolean)

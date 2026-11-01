@@ -1,4 +1,13 @@
-/** Authorized immutable-generation exports, durable writers and safe CSV. */
+/** Legacy mirror.export_jobs artifact pipeline; not production HTTP admission.
+ * Input: trusted database/publication/field/approval adapters and bounded budgets.
+ * Output: legacy job creation, artifact generation and authorized download APIs.
+ * Authority: revalidated shop, installation, contract and protected generation.
+ * Lifecycle/effects: repository transactions own legacy jobs, leases, artifacts
+ * and audit writes; fenced attempts isolate uploads and ambiguous commits.
+ * Production uses export/export-service.server.js createExportService with
+ * export_engine.v2 and export/export-runtime.server.js instead. No alias is
+ * exported: importing this factory must explicitly opt into the legacy contract.
+ */
 import {createHash,randomUUID} from "node:crypto";
 import {FieldError,FIELD_ERROR_CODES as C} from "../fields/types.js";
 import {assertAuthorizedFieldService} from "../fields/resolve.js";
@@ -12,7 +21,7 @@ export function encodeCsvCell(value) {
   if(/^[\s\u0000-\u001f]*[=+\-@]/.test(text)||/^[\t\r\n]/.test(text))text=`'${text}`;
   return `"${text.replace(/"/g,'""')}"`;
 }
-export function createExportService({database,resolveShop,publicationService,publicationRepository,approvalService,fieldService,physicalSchema,authorizeExport,maxBytes=268435456,maxRows=100000}={}) {
+export function createLegacyArtifactExportService({database,resolveShop,publicationService,publicationRepository,approvalService,fieldService,physicalSchema,authorizeExport,maxBytes=268435456,maxRows=100000}={}) {
   if(!Number.isSafeInteger(maxBytes)||maxBytes<1||maxBytes>1073741824||!Number.isSafeInteger(maxRows)||maxRows<1||maxRows>1000000)throw new TypeError("Export requires bounded server-owned row and byte budgets");
   if(typeof database?.connect!=="function"||typeof resolveShop!=="function"||typeof publicationService?.requirePublished!=="function"||typeof publicationService?.lockForRead!=="function"||typeof publicationRepository?.getPublishedContext!=="function"||
     typeof publicationRepository?.acquireReadLease!=="function"||typeof publicationRepository?.renewReadLease!=="function"||typeof approvalService?.getApprovedContract!=="function"||typeof authorizeExport!=="function")throw new TypeError("Export requires authenticated publication, approval, retention and authorization services");
@@ -72,7 +81,7 @@ export function createExportService({database,resolveShop,publicationService,pub
       const shopId=await shop(authContext,unsupported);
       if(!["csv","jsonl"].includes(format)||typeof commandId!=="string"||!(/^[1-9][0-9]{0,18}$/).test(commandId)||BigInt(commandId)>9223372036854775807n)fail(C.INVALID_VALUE,"Supported export format and command ID required");
       return transaction(async client=>{
-        await publicationService.lockForRead(client);
+        await publicationService.lockForRead(client,shopId);
         const prior=(await client.query("SELECT * FROM mirror.export_jobs WHERE shop_id=$1 AND command_id=$2 AND format=$3",[shopId,commandId,format])).rows[0];
         if(prior){await authorize(client,authContext,prior);return Object.freeze({exportJobId:prior.id,status:prior.status});}
         const target=(await client.query(`SELECT s.id AS snapshot_id,s.generation_id,s.coverage_revision FROM mirror.job_commands c JOIN mirror.execution_contracts a ON a.shop_id=c.shop_id AND a.id=c.contract_id

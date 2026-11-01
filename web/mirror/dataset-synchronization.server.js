@@ -612,7 +612,7 @@ export function createDatasetSynchronizationService({ database, syncRunService }
       if (client) {
         return runSync(client);
       }
-      return transaction(database, runSync);
+      return transaction(database, runSync, shopId);
     },
 
     async completeDatasetIngestion({
@@ -640,7 +640,7 @@ export function createDatasetSynchronizationService({ database, syncRunService }
       if (client) {
         return finish(client);
       }
-      return transaction(database, finish);
+      return transaction(database, finish, shopId);
     },
   });
 }

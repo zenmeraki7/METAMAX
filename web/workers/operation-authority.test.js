@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {bulkInstructions,assertIntendedValues,requireWriteAuthorization} from '../services/operation-instructions.server.js';
 import {createOperationWorker} from './operation.worker.js';
 const shopId='worker.myshopify.com';
-const contract={shop_id:shopId,status:'APPROVED',operation:'bulk_edit',contract:{updates:{title:'Approved'}}};
+const contract={shop_id:shopId,status:'APPROVED',operation:'bulk_edit',contract:{writeCapabilityVersion:'product-set-v1',updates:{title:'Approved'}}};
 for(const [label,intended] of [['display metadata',{title:'Approved',targetTitle:'Metadata'}],['unapproved fields',{title:'Approved',vendor:'Injected'}],['changed values',{title:'Changed'}]]){
  test(`operation instructions reject ${label}`,()=>assert.throws(()=>assertIntendedValues(intended,bulkInstructions(contract,shopId))));
 }

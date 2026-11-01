@@ -1,13 +1,19 @@
-/** Only capture requests AFTER Shopify validateAuthenticatedSession middleware. */
+/** Only capture AFTER official Shopify verification. Input: server session and
+ * opaque request; output: private request context/current stored session/tenant.
+ * Authority requires classified identity, exact credential and branded active
+ * installation at capture and every resolution. Missing resolver issues no
+ * context. No durable effects; token/actor/classification/reinstall changes
+ * revoke the context; scope/expiry are reloaded and checked by current policy.
+ */
 import { FieldError, FIELD_ERROR_CODES as C } from "../fields/types.js";
-import { isValidShopifySession } from "./session-validation.js";
+import { shopifySessionEvidence,verifyCurrentShopifySession } from "./session-validation.js";
+import {assertInstallationTenant} from '../security/installation-lifecycle.server.js';
 
-export function createFilterAuthentication({ sessionStorage } = {}) {
+export function createFilterAuthentication({ sessionStorage,resolveInstallation } = {}) {
   if (typeof sessionStorage?.loadSession !== "function")
     throw new TypeError("Shopify session storage required");
   const requests = new WeakMap(),
     sessions = new WeakMap();
-  const valid = session => isValidShopifySession(session, { requireCredentials: true });
   async function resolveSession(authContext) {
     const identity = authContext && sessions.get(authContext);
     if (!identity)
@@ -16,16 +22,11 @@ export function createFilterAuthentication({ sessionStorage } = {}) {
         "Authenticated filter session required",
       );
     const stored = await sessionStorage.loadSession(identity.id);
-    if (
-      !valid(stored) ||
-      stored.id !== identity.id ||
-      stored.shop !== identity.shop
-    ) {
-      throw new FieldError(
-        C.PERMISSION_DENIED,
-        "Filter session expired or revoked",
-      );
-    }
+    verifyCurrentShopifySession(stored,identity.evidence);
+    const tenant=assertInstallationTenant(await resolveInstallation(identity.shop));
+    if(tenant.shopId!==identity.shop||identity.tenant.installationVersion!==tenant.installationVersion)
+      throw new FieldError(C.PERMISSION_DENIED,'Session belongs to another installation lifecycle');
+    verifyCurrentShopifySession(stored,identity.evidence);
     return stored;
   }
   async function resolveShop(authContext) {
@@ -33,16 +34,23 @@ export function createFilterAuthentication({ sessionStorage } = {}) {
   }
   return Object.freeze({
     capture(req, res, next) {
+      requests.delete(req);
       const session = res.locals.shopify?.session;
-      if (valid(session)) {
-        const authContext = Object.freeze({});
-        sessions.set(
-          authContext,
-          Object.freeze({ id: session.id, shop: session.shop }),
-        );
-        requests.set(req, authContext);
-      }
-      next();
+      let evidence;
+      try {evidence=shopifySessionEvidence(session);} catch {next();return;}
+      const authContext = Object.freeze({});
+      const requestTenant=res.locals.shopify?.installationTenant;
+      if(typeof resolveInstallation!=='function')return next(new FieldError(C.MISSING_DEPENDENCY,'Installation-bound authentication required'));
+      return Promise.resolve().then(()=>resolveInstallation(evidence.shopId)).then(tenant=>{
+        assertInstallationTenant(tenant);if(tenant.shopId!==evidence.shopId)throw new FieldError(C.PERMISSION_DENIED,'Installation identity mismatch');
+        if(requestTenant){
+          assertInstallationTenant(requestTenant);
+          if(requestTenant.shopId!==tenant.shopId||requestTenant.installationVersion!==tenant.installationVersion)
+            throw new FieldError(C.PERMISSION_DENIED,'Request installation lifecycle changed');
+        }
+        verifyCurrentShopifySession(session,evidence);
+        sessions.set(authContext,Object.freeze({id:evidence.sessionId,shop:evidence.shopId,tenant,evidence}));requests.set(req,authContext);next();
+      }).catch(next);
     },
     // Resolve once for routes that need the session rather than an opaque context.
     // This does not cache authority: each call rechecks current storage.
@@ -58,5 +66,9 @@ export function createFilterAuthentication({ sessionStorage } = {}) {
     },
     resolveShop,
     resolveSession,
+    async resolveTenant(authContext){
+      if(typeof resolveInstallation!=='function')throw new FieldError(C.PERMISSION_DENIED,'Installation-bound authentication required');
+      await resolveSession(authContext);return sessions.get(authContext).tenant;
+    },
   });
 }

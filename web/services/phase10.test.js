@@ -1,12 +1,14 @@
-import test from "node:test";
+import test,{mock} from "node:test";
 import assert from "node:assert/strict";
-import { createExportService } from "./export.server.js";
+import { createLegacyArtifactExportService } from "./export.server.js";
 import { createImportPreviewService } from "./import-preview.server.js";
-import { createSchedulesService } from "./schedules.server.js";
+const actualRuntime=await import('../security/runtime-database.server.js');
+mock.module('../security/runtime-database.server.js',{namedExports:{...actualRuntime,assertRuntimeDatabaseProfile(){}}});
+const {createSchedulesService}=await import('./schedules.server.js');
 import { createSavedFiltersService } from "./saved-filters.server.js";
 
 test("I/O services cannot initialize without trusted authorization and durable dependencies", () => {
-  assert.throws(() => createExportService({database:{query(){}}}), /Export requires/);
+  assert.throws(() => createLegacyArtifactExportService({database:{query(){}}}), /Export requires/);
   assert.throws(() => createImportPreviewService({database:{query(){}}}), /Import previews require/);
 });
 
@@ -23,7 +25,7 @@ test("schedules service: discovery persists occurrences without selection, appro
 
   const mockDb = {
     async query(sql, params) {
-      if (sql.includes("mirror.job_schedules") && sql.includes("FOR UPDATE SKIP LOCKED")) {
+      if (sql.includes("mirror.job_schedules") && sql.includes("FOR UPDATE OF j SKIP LOCKED")) {
         return { rows: [scheduleState] };
       }
       if(sql.includes("INSERT INTO mirror.schedule_occurrences"))return {rows:[{id:"occurrence",shop_id:shopId,schedule_id:scheduleState.id}]};
@@ -65,7 +67,7 @@ test("schedules service: discovery persists occurrences without selection, appro
   };
 
   const service = createSchedulesService({
-    database: mockDb,
+    database: mockDb,workerDatabase:mockDb,
     selectionService: mockSelection,
     approvalService: mockApproval,
     jobDispatchService: mockDispatch,
@@ -136,5 +138,7 @@ test("saved filters: stores AST recipe and revalidates semantically on load", as
   });
 
   assert.equal(loaded.name, "Summer Products");
+  stored.fingerprint='0'.repeat(64);
+  await assert.rejects(()=>service.loadAndValidateFilter({authContext,filterId:saved.id}),{code:'FIELD_CONTRACT_MISMATCH'});
   assert.equal(validatedCalled, true);
 });

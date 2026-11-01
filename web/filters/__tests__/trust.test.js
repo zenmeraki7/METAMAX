@@ -479,8 +479,8 @@ describe("validated filter trust and live compilation guard", {
     const validated = await f.service.validateFilter(ast(), context);
     assert.deepEqual(validated.definitionRevisions, []);
     assert.equal(validated.versions.operators, 1);
-    assert.equal(validated.versions.normalization, 1);
-    assert.equal(validated.versions.constraints, 3);
+    assert.equal(validated.versions.normalization, 2);
+    assert.equal(validated.versions.constraints, 5);
     assert.equal(validated.fingerprint, fingerprintFilterExecution({
       ast: validated.ast, shopId: validated.shopId, operation: validated.operation, operationId: validated.operationId,
       generationId: validated.generationId, coverageRevision: validated.coverageRevision,

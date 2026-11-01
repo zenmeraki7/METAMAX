@@ -17,13 +17,13 @@ function fixture(pages, { mapRows, failItems = false } = {}) {
   const client = {
     async query(sql, params) {
       calls.push({ sql, params });
-      if (sql.includes("FROM mirror.publications")) return { rows: [{ generation_id: "gen", coverage_revision: "rev", mapping_version: "mapping" }] };
+      if (sql.includes("FROM mirror.publications")) return { rows: [{ generation_id: "gen", coverage_revision: "rev", mapping_version: "mapping",installation_version:"installation" }] };
       if (sql.includes("FROM mirror.products")) {
         const ids = [...params[2], ...params[3]];
         return { rows: mapRows ? mapRows(ids) : ids.map(id => ({ id: id.replace("gid://shopify/Product/", ""), shopify_id: `gid://shopify/Product/${id.replace("gid://shopify/Product/", "")}` })) };
       }
       if (sql.includes("INSERT INTO mirror.selection_snapshots")) snapshots.push(params);
-      if(sql.includes("SELECT * FROM mirror.selection_snapshots"))return {rows:snapshots.filter(p=>p[1]===params[1]).map(p=>({id:p[1],shop_id:p[0],generation_id:p[2],coverage_revision:p[3],status:"APPROVED",expires_at:p[12]}))};
+      if(sql.includes("SELECT s.* FROM mirror.selection_snapshots"))return {rows:snapshots.filter(p=>p[1]===params[1]).map(p=>({id:p[1],shop_id:p[0],generation_id:p[2],coverage_revision:p[3],status:"APPROVED",expires_at:p[12],mapping_version:p[4],operation:p[5],operation_id:p[6],target_mode:p[14],installation_version:p[15],selected_count:String(items.length),selection_hash:p[11],frozen_at:p[13],registry_version:p[9],definition_revisions:JSON.parse(p[10])}))};
       if (sql.includes("INSERT INTO mirror.selection_items")) {
         if (failItems) throw new Error("membership write failed");
         for(const id of params[3]){if(items.includes(id))throw new Error("Duplicate product across selection pages");items.push(id);}
@@ -33,7 +33,7 @@ function fixture(pages, { mapRows, failItems = false } = {}) {
         for(let i=items.length-1;i>=0;i--)if(excluded.has(items[i]))items.splice(i,1);
       }
       if(sql.includes("SELECT product_id FROM mirror.selection_items"))return {rows:items.filter(id=>BigInt(id)>BigInt(params[2])).sort((a,b)=>BigInt(a)<BigInt(b)?-1:BigInt(a)>BigInt(b)?1:0).slice(0,params[3]??1000).map(product_id=>({product_id}))};
-      if(sql.includes("UPDATE mirror.selection_snapshots SET status")) {snapshots[0][8]=params[6];snapshots[0][9]=params[7];snapshots[0][10]=params[8];}
+      if(sql.includes("UPDATE mirror.selection_snapshots SET status")) {snapshots[0][8]=params[6];snapshots[0][9]=params[7];snapshots[0][10]=params[8];snapshots[0][11]=params[4];}
       return { rows: [], rowCount: 1 };
     },
     release() {},
@@ -205,6 +205,9 @@ test("selection returns bounded metadata and membership pages use numeric ID ord
   const f=fixture([{productIds:["100","20","3"]}]);
   const result=await f.select();
   assert.equal(Object.hasOwn(result,"productIds"),false);
+  const stored=await f.service.getSelectionSnapshot({authContext,snapshotId:result.snapshotId});
+  assert.deepEqual(stored,result);assert.ok(Object.isFrozen(stored));
+  assert.equal(Object.hasOwn(stored,'selected_count'),false);
   assert.ok(Buffer.byteLength(JSON.stringify(result))<2048);
   assert.equal(result.selectionHash,createHash("sha256").update("3,20,100").digest("hex"));
   const first=await f.service.getSelectionItems({authContext,snapshotId:result.snapshotId,limit:2});
@@ -224,4 +227,10 @@ test("protected transaction callback shares selection client and aborts membersh
   assert.equal(f.calls.some(call=>call.sql==="CHECKPOINT CALLBACK"),true);
   assert.deepEqual(f.state(),{committed:false,rolledBack:true});
   assert.deepEqual(f.items,[]);
+});
+
+test('explicit selections reject unresolved IDs rather than reducing merchant scope',async()=>{
+ const f=fixture([{productIds:['1']}],{mapRows:()=>[]});
+ await assert.rejects(()=>f.service.createSelection({authContext,productIds:['1']}),{code:'FIELD_CONTRACT_MISMATCH'});
+ assert.equal(f.calls.some(call=>call.sql.includes("SET status='APPROVED'")),false);
 });

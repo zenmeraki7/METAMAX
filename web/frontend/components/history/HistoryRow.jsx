@@ -1,3 +1,4 @@
+import {HISTORY_STATUS_VISUALS} from '../../../shared/history-operation-contract.js';
 import HistoryActionMenu from "./HistoryActionMenu.jsx";
 const icons = {
   Edit: "edit",
@@ -16,26 +17,6 @@ const typeLabels = {
   Sync: "Sync",
   Automation: "Automation",
   File: "File",
-};
-const statusTones = {
-  Completed: "success",
-  Cancelled: "neutral",
-  Failed: "critical",
-  Running: "info",
-  Queued: "attention",
-  Pending: "attention",
-  Retrying: "warning",
-  Expired: "neutral",
-};
-const statusIcons = {
-  Completed: "check-circle",
-  Cancelled: "x-circle",
-  Failed: "alert-circle",
-  Running: "refresh",
-  Queued: "clock",
-  Pending: "clock",
-  Retrying: "refresh",
-  Expired: "alert-circle",
 };
 export default function HistoryRow({
   item,
@@ -92,8 +73,8 @@ export default function HistoryRow({
 
       <s-table-cell>
         <s-badge
-          tone={statusTones[item.status] || "neutral"}
-          icon={statusIcons[item.status] || "info"}
+          tone={HISTORY_STATUS_VISUALS[item.status]?.tone || "neutral"}
+          icon={HISTORY_STATUS_VISUALS[item.status]?.icon || "info"}
         >
           {item.status}
         </s-badge>
@@ -103,9 +84,10 @@ export default function HistoryRow({
         <s-stack class="mh-progress" gap="base">
           <s-text>
             {item.processed.toLocaleString("en-US")} /{" "}
-            {item.total.toLocaleString("en-US")}
+            {item.total.toLocaleString("en-US")}{item.countUnit === 'fields' ? ' fields' : ''}
           </s-text>
-
+          {item.failedCount !== undefined && <s-text>{item.processed.toLocaleString("en-US")} verified{item.countUnit === 'fields' ? ' fields' : ''} · {item.failedCount.toLocaleString("en-US")} failed{item.countUnit === 'fields' ? ' fields' : ''} · {item.total.toLocaleString("en-US")} {item.countUnit === 'fields' ? 'recorded fields' : 'total'}</s-text>}
+          {item.uncertainCount > 0 && <s-text>{item.uncertainCount.toLocaleString("en-US")} uncertain</s-text>}
           <progress
             value={item.processed}
             max={item.total}

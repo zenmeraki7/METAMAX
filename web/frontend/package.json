@@ -4,8 +4,8 @@
   "private": true,
   "license": "UNLICENSED",
   "scripts": {
-    "test:ui": "node --test tests/modal-overlay.test.js tests/web-components.test.js tests/frontend-quality.test.js tests/sync-notification.test.js",
-    "test:products": "node --test tests/products-catalog.test.js tests/products-toolbar.test.js",
+    "test:ui": "node --test tests/modal-overlay.test.js tests/web-components.test.js tests/frontend-quality.test.js tests/sync-notification.test.js tests/history-live.test.js tests/source-status.test.js tests/product-capabilities.test.js",
+    "test:products": "node --test tests/products-catalog.test.js tests/products-toolbar.test.js tests/filter-contract.test.js",
     "build": "vite build",
     "dev": "vite",
     "coverage": "vitest run --coverage"
@@ -27,6 +27,8 @@
     "history": "^5.3.0",
     "jsdom": "^24.0.0",
     "prettier": "^3.2.5",
-    "vi-fetch": "^0.6.1"
+    "vi-fetch": "^0.6.1",
+    "esbuild": "0.21.5",
+    "@babel/parser": "7.29.11"
   }
 }

@@ -46,7 +46,7 @@ export function assertSyncDriver({ database, prisma }) {
  */
 export async function runSyncDbTransaction({ database, prisma, work, maxRetries = 3,
   statementTimeoutMs = 5000, lockTimeoutMs = 1000, transactionTimeoutMs = 10000,
-  readOnly = false } = {}) {
+  readOnly = false, isolationLevel = "Serializable" } = {}) {
   assertSyncDriver({ database, prisma });
   if (typeof work !== "function") throw new TypeError("Database callback required");
   if (!Number.isSafeInteger(maxRetries) || maxRetries < 0 || maxRetries > 5) throw new RangeError("Invalid retry limit");
@@ -54,6 +54,7 @@ export async function runSyncDbTransaction({ database, prisma, work, maxRetries 
     if (!Number.isSafeInteger(value) || value < 100 || value > 30000) throw new RangeError("Invalid database timeout");
   }
   if (typeof readOnly !== "boolean") throw new TypeError("Read-only flag required");
+  if (!['Serializable','ReadCommitted'].includes(isolationLevel)) throw new TypeError('Unsupported synchronization isolation');
   for (let retry = 0; ; retry++) {
     let callbackCompleted = false;
     try {
@@ -61,7 +62,7 @@ export async function runSyncDbTransaction({ database, prisma, work, maxRetries 
         // SET is a command, not SELECT set_config(): no early MVCC snapshot.
         await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = '${statementTimeoutMs}ms'`);
         await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '${lockTimeoutMs}ms'`);
-        await tx.$executeRawUnsafe(`LOCK TABLE "mirror"."publications" IN ${readOnly ? "ACCESS SHARE" : "ACCESS EXCLUSIVE"} MODE`);
+        await tx.$executeRawUnsafe(`LOCK TABLE "mirror"."publications" IN ACCESS SHARE MODE`);
         const result = await work(tx);
         callbackCompleted = true;
         return result;
@@ -71,7 +72,7 @@ export async function runSyncDbTransaction({ database, prisma, work, maxRetries 
           if (typeof tx.$queryRawUnsafe !== "function" || typeof tx.$executeRawUnsafe !== "function") throw new TypeError("Prisma SQL transaction methods required");
           if (readOnly) await tx.$executeRawUnsafe("SET TRANSACTION READ ONLY");
           return setup(tx);
-        }, { isolationLevel: "Serializable", maxWait: 5000, timeout: transactionTimeoutMs });
+        }, { isolationLevel, maxWait: 5000, timeout: transactionTimeoutMs });
       }
 
       const client = await acquire(database);
@@ -90,7 +91,7 @@ export async function runSyncDbTransaction({ database, prisma, work, maxRetries 
         timer = setTimeout(() => reject(Object.assign(new Error("Synchronization transaction deadline exceeded"), { code: "TRANSACTION_DEADLINE" })), transactionTimeoutMs);
       });
       try {
-        await Promise.race([client.query(`BEGIN ISOLATION LEVEL SERIALIZABLE${readOnly ? " READ ONLY" : ""}`), deadline]);
+        await Promise.race([client.query(`BEGIN ISOLATION LEVEL ${isolationLevel === 'Serializable' ? 'SERIALIZABLE' : 'READ COMMITTED'}${readOnly ? " READ ONLY" : ""}`), deadline]);
         const result = await Promise.race([setup(tx), deadline]);
         active = false;
         commitSent = true;

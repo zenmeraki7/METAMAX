@@ -1,3 +1,4 @@
+import {stagedResume} from './staged-catalog-download.server.js';
 import { Readable } from "node:stream";
 import {createHash} from 'node:crypto';
 import {validateProducts} from './catalog-validation.js';
@@ -181,8 +182,10 @@ export function createJsonlIngestionService({
       let expected;
       const lineStream = normalizeLineStream(lines);
 
-      let ordinal = 0;
-      let total = 0n;
+      const resume=stagedResume(lines,{shopId,generationId,runId});
+      if(resume&&resume.processedLines!==BigInt(run.processedLines))invalid('Staged ingestion progress changed');
+      let ordinal = resume?.ordinal??0;
+      let total = resume?.processedLines??0n;
       let batch = [];
       let current = null;
       let bytes = 0;
@@ -224,8 +227,7 @@ export function createJsonlIngestionService({
             fence,
             ordinal,
             records,
-          }),
-        );
+          }), shopId);
         if (receipt?.replayed !== true) newChunks++;
         ordinal++;
         batch = [];
@@ -313,7 +315,7 @@ export function createJsonlIngestionService({
             shopId,
             generationId,
           });
-        });
+        }, shopId);
 
         return {
           totalLinesProcessed: total,

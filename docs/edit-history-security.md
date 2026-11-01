@@ -9,6 +9,10 @@ dispatch activation is performed by this implementation.
 Active prerequisites are V1, its V2 upgrade, the multi-resource integrity
 migration and `20261030130000_edit_history_mutation_requests`. The pending
 security/retention migration follows them; no applied V1/V2 file was changed.
+The subsequent pending `20261030160000_history_undo_execution` migration is
+required for journaled worker/undo execution and the current runtime profile.
+See [execution and undo fixes](bulk-execution-history-fixes.md) for its rollout
+requirements, bounded scopes and the new worker regression coverage.
 
 ## Database boundary
 
@@ -69,9 +73,8 @@ They use HISTORY_DATABASE_URL, HISTORY_MAINTENANCE_DATABASE_URL and
 HISTORY_PRIVACY_DATABASE_URL respectively. Output contains profile, verification
 result and generic finding codes, never URLs/passwords or raw database errors.
 Missing dedicated credentials fail verification rather than falling back to the
-general application database. Production credentials have not been supplied or
-verified in this task; the runtime check currently reports HISTORY_DATABASE_URL
-as configuration-required.
+general application database. This task did not verify production credentials;
+live activation requires all three deployment checks with the restricted logins.
 
 ## Encryption and reads
 
@@ -118,7 +121,9 @@ does not claim to erase those independent stores or all app data.
 
 Default history retention is **30 days**. New operations receive retained_until;
 existing NULL deadlines use created_at + 30 days. Ordinary expiry purges terminal
-operations only and does not purge a live executor. Legal holds always prevent
+operations only and does not purge a live executor. A valid inverse approval or
+unresolved inverse execution also retains its original source during ordinary
+expiry. Legal holds always prevent
 purging and produce review-required privacy status. The runtime role cannot
 change deadlines, holds or maintenance state.
 
@@ -174,9 +179,9 @@ Official webhook requirements were checked using the
 
 | Suite | Result |
 | --- | --- |
-| Backend `npm test` | 1,027 passed, no failures, one existing TODO |
-| Fresh PostgreSQL history migration/repository | 76 passed |
-| V1/V2 PostgreSQL upgrade/history repository | 77 passed |
+| Backend `npm test` | 1,034 passed, no failures, one existing TODO |
+| Fresh PostgreSQL history migration/repository/worker | 92 passed |
+| V1/V2 PostgreSQL upgrade/history repository/worker | 93 passed |
 | Complete PostgreSQL migration/schema chain | 144 passed |
 
 PostgreSQL tests use disposable databases and genuine restricted LOGIN roles.

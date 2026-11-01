@@ -1,3 +1,4 @@
+import {requireInstalledWriteCapability,WRITE_CAPABILITY_VERSION} from './write-capabilities.js';
 import {
   deepFreeze,
   FieldError,
@@ -130,6 +131,8 @@ const ISSUED_RESULTS = new WeakMap();
 const CANONICAL_CACHE = new Map();
 const AUTHORIZED_FIELD_SERVICES = new WeakSet();
 let registryVersion = null;
+/** Metadata only; this fingerprint issues no field or execution authority. */
+export function getInstalledFieldRegistryVersion(){ensureCanonicalCache();return registryVersion;}
 
 // Only validated, immutable server-owned metadata reaches this serializer.
 function mappingFingerprint(value) {
@@ -965,7 +968,9 @@ export function getResolvedFieldPolicy(resolved, context = POLICY_CONTEXT.READ, 
     fieldId: resolved.id, shopId, definitionToken: resolved.policy.definitionToken,
     context, type: resolved.type, nullable: resolved.nullable,
     constraints: resolved.policy[context],
-    operations: context === POLICY_CONTEXT.WRITE ? resolved.policy.writePolicy?.operations ?? [] : [],
+    operations: context === POLICY_CONTEXT.WRITE ? (resolved.policy.writePolicy?.operations??[]).filter(operation=>{
+      try{requireInstalledWriteCapability(resolved.id,operation,WRITE_CAPABILITY_VERSION);return true;}catch{return false;}
+    }) : [],
   });
 }
 
@@ -1278,6 +1283,7 @@ export function createFieldService({ adapter, authorizeAccess, verifyCoverage, r
     const datasetSet = new Set();
     for (const resolved of fields) {
       assertResolvedFieldAccess(resolved, access, { shopId });
+      if(access === FIELD_ACCESS.WRITE)requireInstalledWriteCapability(resolved.id,executionContext.writeOperation ?? 'set',executionContext.writeCapabilityVersion ?? WRITE_CAPABILITY_VERSION);
       for (const dataset of resolved.source.datasets) {
         if (!DATASETS.has(dataset)) fail(C.INVALID_SOURCE, "Unsupported source dataset", resolved.id);
         datasetSet.add(dataset);
@@ -1352,6 +1358,7 @@ export function createFieldService({ adapter, authorizeAccess, verifyCoverage, r
       executionContractId: approval?.executionContractId ?? null,
       approvalRevision: approval?.approvalRevision ?? null,
       registryVersion: resolvedRegistryVersion,
+      writeCapabilityVersion: WRITE_CAPABILITY_VERSION,
       mirrorSchemaVersion: coverage.mirrorSchemaVersion ?? null,
       sourceContractVersion: coverage.sourceContractVersion ?? null,
       definitionRevisions: fields.filter(field => field.origin === FIELD_ORIGINS.DYNAMIC)
@@ -1395,7 +1402,7 @@ export function createFieldService({ adapter, authorizeAccess, verifyCoverage, r
     if (current.shopId !== resolution.shopId) {
       fail(C.PERMISSION_DENIED, "Authenticated shop changed during revalidation");
     }
-    for (const key of ["access", "phase", "operation", "operationId", "generationId", "coverageRevision", "targetingSnapshotId", "executionContractId", "approvalRevision", "registryVersion", "mirrorSchemaVersion", "sourceContractVersion"]) {
+    for (const key of ["access", "phase", "operation", "operationId", "generationId", "coverageRevision", "targetingSnapshotId", "executionContractId", "approvalRevision", "registryVersion", "writeCapabilityVersion", "mirrorSchemaVersion", "sourceContractVersion"]) {
       if (current[key] !== resolution[key]) fail(C.CONTRACT_MISMATCH, "Field resolution binding changed during revalidation");
     }
     return current;

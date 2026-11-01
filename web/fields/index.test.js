@@ -5,7 +5,7 @@ import { SOURCE_DATASETS } from "./sources.js";
 
 test("public Field Engine API exposes only the approved stable surface", () => {
   assert.deepEqual(Object.keys(fields).sort(), [
-    "CANONICAL_FIELD_COUNT", "CANONICAL_REGISTRY_INFO", "getCanonicalField",
+    "FIELD_CAPABILITY_CONTRACT_VERSION", "FIELD_CAPABILITY_VERSIONS", "getFieldCapability", "CANONICAL_FIELD_COUNT", "CANONICAL_REGISTRY_INFO", "getCanonicalField",
     "requireCanonicalField", "listCanonicalFields", "FIELD_TYPES",
     "FIELD_ERROR_CODES", "FieldError", "isFieldType", "isNumericType", "isSortableType",
     "normalizeFieldValue", "normalizeOperatorOperand", "POLICY_CONTEXT",

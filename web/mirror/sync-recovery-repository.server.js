@@ -1,3 +1,4 @@
+import {CATALOG_PHASE_GENERATIONS as GENERATION_STATES} from './catalog-phase-generations.server.js';
 /** Fenced PostgreSQL recovery persistence for the catalog execution extension.
  * No external requests occur here. Every transaction retains the publication
  * barrier; final CAS failures roll back earlier uncertainty/binding writes.
@@ -16,8 +17,6 @@ const MAX_FENCE = 9223372036854775807n;
 const MAX_RECOVERIES = 8;
 const ID = /^[A-Za-z0-9_-]{1,128}$/;
 const OPERATION = /^gid:\/\/shopify\/BulkOperation\/[1-9][0-9]*$/;
-const GENERATION_STATES = Object.freeze({STARTING:["INGESTING"],WAITING:["INGESTING"],
-  INGESTING:["INGESTING","RECONCILING"],RECONCILING:["RECONCILING","VERIFIED"],PUBLISHING:["VERIFIED","PUBLISHED"]});
 class StaleRecoveryClaim extends Error {}
 export class SyncRecoveryRepositoryError extends Error {
   constructor(message) { super(message);this.name="SyncRecoveryRepositoryError";this.code="INVALID_RECOVERY_INPUT"; }
@@ -92,6 +91,7 @@ export function createSyncRecoveryRepository({database,syncRunRepository,verifyR
     catch(error){if(error instanceof StaleRecoveryClaim)return Object.freeze({kind:"STALE_CLAIM"});throw error;}
   }
   async function lockShop(c,shopId) {
+    await c.query("SELECT set_config('app.shop_id',$1,true)",[shopId]);
     return (await c.query("SELECT id FROM mirror.shops WHERE id=$1 AND uninstalled_at IS NULL FOR UPDATE",[shopId])).rows.length===1;
   }
   // This exact owner predicate is repeated in SQL for every final mutation.

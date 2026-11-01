@@ -1,3 +1,4 @@
+import {createInstallationResolver} from '../security/installation-lifecycle.server.js';
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
@@ -10,6 +11,10 @@ import { shopifyApp } from "@shopify/shopify-app-express";
 import { createApp } from "../app.js";
 import { createWebhookHandlers } from "../privacy.js";
 import productCreator from "../product-creator.js";
+import {createFiltersController} from '../controllers/filters.controller.js';
+import {parseFilterAst} from '../filters/ast.js';
+import {requireCanonicalField} from '../fields/canonical.js';
+import {normalizeFieldValue} from '../fields/normalize.js';
 import {
   createShopifyAuthMiddleware,
   createAuthenticatedSessionService,
@@ -17,16 +22,26 @@ import {
   isValidShopifySession,
 } from "../middleware/shopify-auth.js";
 
-// Filter routes and the trusted field resolver are currently stubs.
-// When the HTTP consumer exists, send a JSON descriptor with a valid canonical
-// ID but forged type/nullable/constraints. Assert a client error and spy on the
-// normalizer to verify it was never called. Include an ID-only positive control
-// resolved through the trusted registry; a missing-route 404 is not coverage.
-test.todo('HTTP field consumer rejects a forged field descriptor before normalization');
+test('HTTP field consumer rejects a forged descriptor before normalization and accepts registry IDs',async()=>{
+  let normalized=0;
+  const controller=createFiltersController({authenticate:async()=>Object.freeze({}),resolveDatasets:async()=>({executionContext:{}}),logger:{error(){}},
+    compiler:{async validateFilter(input){
+      const parsed=parseFilterAst(input);
+      normalized++;normalizeFieldValue(requireCanonicalField(parsed.root.field),parsed.root.value);
+      return parsed;
+    },async compileFilter(value){return value;}},executor:{async execute(){return {products:[]};}}});
+  await withServer(fakeShopify(),async base=>{
+    const post=field=>fetch(`${base}/api/filters/search`,{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({filter:{version:1,root:{kind:'condition',field,operator:'eq',value:'Summer'}}})});
+    const invalid=await post({id:'product.title',type:'number',nullable:true,constraints:{}});
+    assert.equal(invalid.status,400);assert.equal(normalized,0);
+    const valid=await post('product.title');assert.equal(valid.status,200,await valid.text());assert.equal(normalized,1);
+  },{filterRuntime:{capture(_req,_res,next){next();},search:controller.search}});
+});
 
 function fakeShopify({ authenticated = true, productErrors = [], requests = [] } = {}) {
   const sessionStorage = new MemorySessionStorage();
-  const session = new Session({ id: 'offline_example.myshopify.com', shop: 'example.myshopify.com', state: 'test', isOnline: false, accessToken: 'test-token' });
+  const session = new Session({ id: 'offline_example.myshopify.com', shop: 'example.myshopify.com', state: 'test', isOnline: false, accessToken: 'test-token',scope:'read_products,write_products' });
   sessionStorage.storeSession(session);
   return {
     config: { auth: { path: '/api/auth', callbackPath: '/api/auth/callback' }, webhooks: { path: '/api/webhooks' }, sessionStorage },
@@ -46,7 +61,7 @@ function fakeShopify({ authenticated = true, productErrors = [], requests = [] }
 async function withServer(shopify, callback, options = {}) {
   const directory = await mkdtemp(join(tmpdir(),'newmeta-template-'));
   await writeFile(join(directory,'index.html'),'<html><head><meta name="shopify-api-key" content="%VITE_SHOPIFY_API_KEY%"></head><body>Retained frontend<script type="module" src="/main.jsx"></script></body></html>');
-  const app=createApp({shopify,staticPath:directory,apiKey:'test-key',...options});
+  const app=createApp({shopify,staticPath:directory,apiKey:'test-key',installationDatabase:{async connect(){return {async query(){return {rows:[{installation_version:'test-installation'}]};},release(){}};}},...options});
   const server=app.listen(0,'127.0.0.1');
   await new Promise(resolve=>server.once('listening',resolve));
   try{await callback(`http://127.0.0.1:${server.address().port}`);}finally{await new Promise(resolve=>server.close(resolve)); await rm(directory,{recursive:true,force:true});}
@@ -100,7 +115,7 @@ test('current sync progress is authenticated, tenant-scoped and never cached',as
   const response=await fetch(`${base}/api/mirror/sync?shop=forged.myshopify.com`);
   assert.equal(response.status,200);assert.deepEqual(await response.json(),{data:current});
   assert.equal(response.headers.get('cache-control'),'private, no-store');
-  assert.equal(sessionReads,1);
+  assert.equal(sessionReads,2); // Global installation guard plus route authentication.
  },{catalogImportService:service});
  await withServer(fakeShopify({authenticated:false}),async base=>{
   assert.equal((await fetch(`${base}/api/mirror/sync`)).status,401);
@@ -230,6 +245,36 @@ test('Shopify product validation errors stop creation and return a failed respon
  assert.equal(requests.length,1);
 });
 
+test('sample writes reload storage and enforce both app and online staff permission',async()=>{
+ for(const kind of ['read-only','online-read-only','online-write','revoked']){
+  const requests=[],shopify=fakeShopify({requests}),storage=shopify.config.sessionStorage;
+  const id='offline_example.myshopify.com',session=await storage.loadSession(id);
+  if(kind==='read-only')session.scope='read_products';
+  if(kind.startsWith('online-')){
+   session.isOnline=true;session.expires=new Date(Date.now()+60000);
+   session.onlineAccessInfo={associated_user_scope:kind==='online-write'?'write_products':'read_products',associated_user:{id:42}};
+  }
+  if(kind==='revoked')await storage.deleteSession(id);else await storage.storeSession(session);
+  await withServer(shopify,async base=>{
+   const response=await fetch(`${base}/api/products`,{method:'POST'});
+   assert.equal(response.status,kind==='online-write'?200:kind==='revoked'?401:403,kind);
+  });
+  assert.equal(requests.length,kind==='online-write'?5:0,kind);
+ }
+});
+
+test('unknown webhook paths never fall through to merchant authentication',async()=>{
+ const shopify=fakeShopify();let authenticated=0;
+ shopify.validateAuthenticatedSession=()=> (_req,_res,next)=>{authenticated++;next();};
+ await withServer(shopify,async base=>{
+  for(const path of ['/api/webhooks/unknown','/api/webhooks']){
+   const response=await fetch(base+path);
+   assert.equal(response.status,404);assert.equal((await response.json()).error,'WEBHOOK_ROUTE_NOT_FOUND');
+  }
+ });
+ assert.equal(authenticated,0);
+});
+
 test('uninstall and shop-redact remove only the affected shops sessions',async()=>{
  const storage=new MemorySessionStorage();
  for(const shop of ['one.myshopify.com','two.myshopify.com']) await storage.storeSession(new Session({id:`offline_${shop}`,shop,state:'test',isOnline:false,accessToken:'test-token'}));
@@ -249,6 +294,8 @@ test('official Shopify webhook middleware verifies raw signatures before JSON pa
   const headers={'Content-Type':'application/json','X-Shopify-Topic':'app/uninstalled','X-Shopify-Shop-Domain':'example.myshopify.com','X-Shopify-Webhook-Id':'template-test-event','X-Shopify-API-Version':'2026-10','X-Shopify-Hmac-Sha256':createHmac('sha256',secret).update(body).digest('base64')};
   const valid=await fetch(`${base}/api/webhooks`,{method:'POST',headers,body}); assert.equal(valid.status,200);
   const invalid=await fetch(`${base}/api/webhooks`,{method:'POST',headers:{...headers,'X-Shopify-Hmac-Sha256':'invalid'},body}); assert.equal(invalid.status,401);
+  const tampered=await fetch(`${base}/api/webhooks`,{method:'POST',headers,body:body+' '});assert.equal(tampered.status,401);
+  const unsigned=await fetch(`${base}/api/webhooks`,{method:'POST',headers:{'Content-Type':'application/json'},body});assert.equal(unsigned.status,400);
  });
 });
 
@@ -270,14 +317,24 @@ test('shopify-auth middleware rejects missing, malformed, or expired sessions an
 
  const storage=new MemorySessionStorage();
  await storage.storeSession(new Session({id:'offline_example.myshopify.com',shop:'example.myshopify.com',state:'s',isOnline:false,accessToken:'token-1',scope:'read_products'}));
- const authService=createAuthenticatedSessionService({sessionStorage:storage});
- const req={},res={locals:{shopify:{session:{id:'offline_example.myshopify.com',shop:'example.myshopify.com',accessToken:'token-1'}}}};
- authService.capture(req,res,()=>{});
+ const authService=createAuthenticatedSessionService({sessionStorage:storage,resolveInstallation:createInstallationResolver({readInstallation:async()=>({installation_version:'test-installation'})})});
+ const req={},res={locals:{shopify:{session:{id:'offline_example.myshopify.com',shop:'example.myshopify.com',accessToken:'token-1',isOnline:false}}}};
+ await authService.capture(req,res,()=>{});
  const ctx=await authService.authenticate(req);
  assert.ok(ctx);
  const verified=await authService.requireAuthenticatedShop(ctx);
- assert.deepEqual(verified,{shopId:'example.myshopify.com',sessionId:'offline_example.myshopify.com',scope:'read_products'});
+ assert.deepEqual(verified,{shopId:'example.myshopify.com',installationId:'test-installation',installationVersion:'test-installation',sessionId:'offline_example.myshopify.com',scope:'read_products'});
  await assert.rejects(()=>authService.requireAuthenticatedShop({}),/Authenticated filter session required/);
 });
 
 
+
+test('all protected API families reject revoked installations before invoking handlers',async()=>{
+ const paths=['/api/products','/api/products/count','/api/mirror/count','/api/mirror/status','/api/mirror/sync','/api/catalog/capabilities','/api/filters/search','/api/exports','/api/history','/api/shopify-data/sources'];
+ await withServer(fakeShopify(),async base=>{
+  for(const path of paths)assert.equal((await fetch(base+path)).status,403,path);
+ },{installationDatabase:{async connect(){return {async query(sql,params){if(sql.includes('FROM mirror.shops')){assert.match(sql,/uninstalled_at IS NULL/);assert.deepEqual(params,['example.myshopify.com']);}return {rows:[]};},release(){}};}}});
+});
+test('installation checks fail closed when unavailable',async()=>{
+ await withServer(fakeShopify(),async base=>assert.equal((await fetch(base+'/api/products/count')).status,503),{installationDatabase:null});
+});

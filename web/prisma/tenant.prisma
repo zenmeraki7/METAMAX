@@ -1,6 +1,7 @@
 // METAMAX tenant domain. Loaded together through prisma.config.mjs.
 
 model Shop {
+  catalogRetentionAudit CatalogRetentionAudit[]
   // Authenticated myshopify.com domain; adapters must not substitute browser IDs.
   id                  String                   @id @db.Text
   installedAt         DateTime                 @default(now()) @map("installed_at") @db.Timestamptz(3)
@@ -16,6 +17,7 @@ model Shop {
   subscription        Subscription?
   idempotency         IdempotencyRecord[]
   catalogImports      CatalogImportJob[]
+  catalogRefresh      CatalogRefreshRequest?
   catalogExecutions   CatalogImportExecution[]
   dispatchCursor      SyncDispatchShop?
   dispatches          SyncDispatchDelivery[]

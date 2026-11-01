@@ -1,6 +1,7 @@
 // METAMAX bulk-editing domain. Loaded through prisma.config.mjs.
 
 model EditItem {
+  finalizations OperationFinalization[]
   id                BigInt           @id @default(autoincrement())
   shopId            String           @map("shop_id") @db.Text
   commandId         BigInt           @map("command_id")

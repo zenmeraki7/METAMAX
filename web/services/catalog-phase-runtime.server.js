@@ -1,3 +1,5 @@
+import {boundBulkStatus} from '../mirror/bulk-cleanup-result.server.js';
+import {lockMirror} from "../mirror/transactions.server.js";
 import { randomUUID } from "node:crypto";
 import { createSyncRunRepository } from "../mirror/sync-run-repository.server.js";
 import {
@@ -115,6 +117,7 @@ export async function createCatalogPhaseRuntime({database,shopify,redis,Worker:p
     async enqueue({client,shopId,installationVersion,expectedGenerationId}={}) {
       if(!shopId||typeof shopId!=='string')throw new Error('Active shop identity required');
       const allocate=async c=>{
+        await lockMirror(c,shopId);
         // Allocation acquires the shop-scoped row lock and verifies active installation
         // and staging state inside the transaction so enqueue() is independently concurrency-safe.
         const shopRow=(await c.query(
@@ -172,6 +175,7 @@ export async function createCatalogPhaseRuntime({database,shopify,redis,Worker:p
           JOIN mirror.shops s ON s.id=e.shop_id JOIN mirror.generations g ON g.shop_id=e.shop_id AND g.id=e.generation_id
           LEFT JOIN mirror.ingestion_runs r ON r.id=j.run_id AND r.shop_id=j.shop_id
           WHERE e.completed_at IS NULL AND e.cancel_completed_at IS NULL AND
+            (NOT e.cancel_requested OR e.next_eligible_at IS NULL OR e.next_eligible_at<=clock_timestamp()) AND
             (e.cancel_requested OR j.cancel_requested OR s.uninstalled_at IS NOT NULL OR s.installation_version<>j.installation_version)
             AND (NOT e.cancel_requested OR e.lease_until IS NULL OR e.lease_until<=clock_timestamp())
           ORDER BY e.id LIMIT 1 FOR UPDATE OF e,j`,[])).rows;
@@ -207,6 +211,16 @@ export async function createCatalogPhaseRuntime({database,shopify,redis,Worker:p
           return {id:row.id,kind:completed.rowCount?'COMPLETE':'STALE_CLAIM'};
         }
         await sync.cancelGeneration({shopId:row.shop_id,generationId:row.generation_id});
+        const pendingCleanup=async uncertain=>{
+          const result=await executionTransaction(database,c=>c.query(`UPDATE mirror.catalog_import_executions
+           SET outcome_uncertain=$5,last_error=$6,lease_token=NULL,lease_until=NULL,worker_id=NULL,
+            next_eligible_at=clock_timestamp()+interval '5 seconds'
+           WHERE id=$1 AND shop_id=$2 AND fence=$3 AND lease_token=$4 AND lease_until>clock_timestamp()
+            AND completed_at IS NULL AND cancel_completed_at IS NULL RETURNING id`,
+           [row.id,row.shop_id,row.fence,row.lease_token,uncertain,uncertain?'REMOTE_CANCEL_OUTCOME_UNKNOWN':'REMOTE_CANCEL_PENDING']));
+          return {id:row.id,kind:result.rowCount?'CANCEL_PENDING':'STALE_CLAIM',outcomeUncertain:uncertain};
+        };
+        if(!row.shop_active&&(row.bulk_operation_id||row.outcome_uncertain)||!row.bulk_operation_id&&row.outcome_uncertain)return await pendingCleanup(true);
         if(row.bulk_operation_id&&row.shop_active) {
           const cancelController=new AbortController();
           const onShutdown=()=>cancelController.abort(shutdown.signal.reason);
@@ -232,37 +246,19 @@ export async function createCatalogPhaseRuntime({database,shopify,redis,Worker:p
           };
           let remoteConfirmed=false;
           try {
-            if(row.outcome_uncertain||row.last_error==='REMOTE_CANCEL_OUTCOME_UNKNOWN') {
-              const statusRes=await requestBounded(BULK_STATUS_QUERY,{id:row.bulk_operation_id});
-              const statusOp=statusRes?.data?.bulkOperation;
-              if(statusOp?.id===row.bulk_operation_id&&['CANCELLED','COMPLETED','FAILED','EXPIRED'].includes(statusOp.status)) {
-                remoteConfirmed=true;
-              }
+            if(row.outcome_uncertain||['REMOTE_CANCEL_OUTCOME_UNKNOWN','REMOTE_CANCEL_PENDING'].includes(row.last_error)) {
+              const observed=boundBulkStatus(await requestBounded(BULK_STATUS_QUERY,{id:row.bulk_operation_id}),row.bulk_operation_id);
+              remoteConfirmed=observed.terminal;
+              if(!remoteConfirmed&&observed.status==='CANCELING')return await pendingCleanup(false);
             }
             if(!remoteConfirmed) {
-              const cancelRes=await requestBounded(BULK_CANCEL_MUTATION,{id:row.bulk_operation_id});
-              const payload=cancelRes?.data?.bulkOperationCancel;
-              if(cancelRes?.errors?.length||payload?.userErrors?.length) {
-                const statusRes=await requestBounded(BULK_STATUS_QUERY,{id:row.bulk_operation_id});
-                const statusOp=statusRes?.data?.bulkOperation;
-                if(statusOp?.id===row.bulk_operation_id&&['CANCELLED','COMPLETED','FAILED','EXPIRED'].includes(statusOp.status)) {
-                  remoteConfirmed=true;
-                } else {
-                  throw Object.assign(new Error('Remote bulk cancellation rejected'),{code:'REMOTE_CANCEL_REJECTED'});
-                }
-              } else {
-                remoteConfirmed=true;
-              }
+              const result=boundBulkStatus(await requestBounded(BULK_CANCEL_MUTATION,{id:row.bulk_operation_id}),row.bulk_operation_id,{cancellation:true});
+              remoteConfirmed=result.terminal;
             }
-          } catch(error) {
+            if(!remoteConfirmed)return await pendingCleanup(false);
+          }catch(error){
             logger.error?.({code:error.code},'Cancelled import remote export cleanup failed');
-            await executionTransaction(database,c=>c.query(`UPDATE mirror.catalog_import_executions
-              SET outcome_uncertain=true,last_error='REMOTE_CANCEL_OUTCOME_UNKNOWN',
-                  lease_token=NULL,lease_until=NULL,worker_id=NULL,next_eligible_at=clock_timestamp()
-              WHERE id=$1 AND shop_id=$2 AND fence=$3 AND lease_token=$4 AND lease_until>clock_timestamp()
-                AND completed_at IS NULL AND cancel_completed_at IS NULL`,
-            [row.id,row.shop_id,row.fence,row.lease_token]));
-            return {id:row.id,kind:'CANCEL_PENDING',outcomeUncertain:true};
+            return await pendingCleanup(true);
           } finally {
             shutdown.signal.removeEventListener('abort',onShutdown);
           }

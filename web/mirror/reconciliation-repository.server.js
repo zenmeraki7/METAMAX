@@ -1,5 +1,6 @@
 import {
   transaction,
+  lockMirror,
   shop,
   token,
   integer,
@@ -32,6 +33,7 @@ export function createReconciliationRepository({ database }) {
       return transaction(database, async (client) => {
         let targetGenId = generationId;
         let targetShopId = shopId;
+        if(targetShopId) await lockMirror(client,targetShopId);
 
         // 1. Resolve destination staging generation
         if (targetGenId && targetShopId) {
@@ -73,6 +75,7 @@ export function createReconciliationRepository({ database }) {
           targetShopId = gen.shop_id;
         }
 
+        await lockMirror(client,targetShopId);
         // 2. Atomically lock and claim one due dirty product
         const row = (
           await client.query(
@@ -148,7 +151,7 @@ export function createReconciliationRepository({ database }) {
         ).rows[0];
 
         return { updated: Boolean(row) };
-      });
+      }, claim.shopId);
     },
 
     async commitReconciliation({ claim, observedRevision, replacement }) {
@@ -234,6 +237,46 @@ export function createReconciliationRepository({ database }) {
           return { kind: "SUPERSEDED" };
         }
 
+        // Acknowledge only this revision before any mirror write. Failure below
+        // rolls the acknowledgment back with the replacement.
+        const updateParams = [claim.shopId, claim.productId, String(rev), replacement.kind === "DELETE"];
+        let paramIndex = 5;
+        let fenceClause = "";
+        if (claim.fence != null) {
+          fenceClause = `AND fence = $${paramIndex++}`;
+          updateParams.push(String(claim.fence));
+        }
+        updateParams.push(claim.leaseToken);
+        const leaseTokenClause = `AND lease_token = $${paramIndex++}`;
+
+        const applied = await client.query(
+          `UPDATE mirror.catalog_changes SET
+             applied_revision = $3,
+             dirty = false,
+             deleted = $4,
+             attempts = 0,
+             next_attempt_at = NULL,
+             dead_letter_at = NULL,
+             last_error = NULL,
+             lease_token = NULL,
+             lease_until = NULL,
+             fence = fence + 1,
+             updated_at = clock_timestamp()
+           WHERE shop_id = $1
+             AND product_id = $2
+             AND revision = $3
+             AND applied_revision < $3
+             AND dirty
+             ${fenceClause}
+             ${leaseTokenClause}
+             AND lease_until > clock_timestamp()`,
+          updateParams,
+        );
+
+        if (applied.rowCount !== 1) {
+          return { kind: "SUPERSEDED" };
+        }
+
         // 4. Apply product-family replacement to destination generation
         if (replacement.kind === "DELETE") {
           for (const deleteSql of [
@@ -284,44 +327,6 @@ export function createReconciliationRepository({ database }) {
           [claim.shopId, claim.generationId, claim.productId, String(rev), replacement.kind === "DELETE"],
         );
 
-        // 6. Conditional revision acknowledgment on catalog_changes
-        const updateParams = [claim.shopId, claim.productId, String(rev), replacement.kind === "DELETE"];
-        let paramIndex = 5;
-        let fenceClause = "";
-        if (claim.fence != null) {
-          fenceClause = `AND fence = $${paramIndex++}`;
-          updateParams.push(String(claim.fence));
-        }
-        updateParams.push(claim.leaseToken);
-        const leaseTokenClause = `AND lease_token = $${paramIndex++}`;
-
-        const applied = await client.query(
-          `UPDATE mirror.catalog_changes SET
-             applied_revision = $3,
-             dirty = false,
-             deleted = $4,
-             attempts = 0,
-             next_attempt_at = NULL,
-             dead_letter_at = NULL,
-             last_error = NULL,
-             lease_token = NULL,
-             lease_until = NULL,
-             fence = fence + 1,
-             updated_at = clock_timestamp()
-           WHERE shop_id = $1
-             AND product_id = $2
-             AND revision = $3
-             AND applied_revision < $3
-             ${fenceClause}
-             ${leaseTokenClause}
-             AND lease_until > clock_timestamp()`,
-          updateParams,
-        );
-
-        if (applied.rowCount !== 1) {
-          return { kind: "SUPERSEDED" };
-        }
-
         // 7. Acknowledge mutation journal
         await client.query(
           `UPDATE mirror.mutation_journal
@@ -331,7 +336,7 @@ export function createReconciliationRepository({ database }) {
         );
 
         return { kind: "APPLIED" };
-      });
+      }, claim.shopId);
     },
   });
 }

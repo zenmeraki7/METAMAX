@@ -1,8 +1,10 @@
+// Interface contract (repository root): docs/backend-interface-contracts.md#mutation-and-command-finalization
 /** Fenced journal outcomes and evidence-only recovery. Never sends Shopify writes. */
 import { randomUUID,createHash } from 'node:crypto';
 import { canonicalHistoryJson,normalizeHistorySnapshot,assertMutationTransition,historyFingerprint,requireHistoryId,HISTORY_LIMITS,
  HistoryContractError,HISTORY_ERROR_CODES as C } from './history-contract.js';
 import { createHistoryHookInvoker } from './transaction-hooks.server.js';
+import {assertAfterBinding} from './after-binding.server.js';
 import { historyMemberKey,changeMemberKey,requestMembers } from './request-members.server.js';
 const fail=(code,message)=>{throw new HistoryContractError(code,message);};
 const hash=value=>typeof value==='string'&&/^sha256:[0-9a-f]{64}$/.test(value);
@@ -35,6 +37,7 @@ export function createHistoryLifecycle({database,executionAdapter,resolveTenant,
     if(!op)fail(C.UNAUTHORIZED,'Owned history operation required');
     if(op.purge_requested_at!=null)fail(C.UNAUTHORIZED,'History is being removed');
     await executionAdapter.lockCommandForEvidence({client:tx,tenant,jobId:op.execution_job_id});
+    await executionAdapter.assertEvidenceAuthority({client:tx,tenant,op});
     await tx.query(`SELECT id FROM edit_history.operations WHERE shop_id=$1 AND installation_id=$2 AND id=$3 FOR UPDATE`,[tenant.shopId,tenant.installationId,operationId]);
     const params=[tenant.shopId,tenant.installationId,operationId,mutationId,attemptId];
     const request=(await tx.query(`SELECT * FROM edit_history.mutation_requests WHERE shop_id=$1 AND installation_id=$2 AND operation_id=$3 AND mutation_id=$4 AND attempt_id=$5 FOR UPDATE`,params)).rows[0];
@@ -50,6 +53,29 @@ export function createHistoryLifecycle({database,executionAdapter,resolveTenant,
    }catch(error){await tx.query('ROLLBACK').catch(()=>{});if(['40001','40P01','23505','P2002','P2034'].includes(error.code)&&retry<2)continue;throw error;}finally{tx.release();}
   }
  }
+  async function operationScope(raw,action,callback){
+   data(raw,['authContext','operationId','claim','recoveryClaim','mutationId','attemptId']);
+   if(!raw.authContext)fail(C.UNAUTHORIZED,'Authenticated lifecycle context required');
+   const operationId=reference(raw.operationId),authContext=raw.authContext;
+   for(let retry=0;;retry++){
+    const tx=await database.connect(),invoke=createHistoryHookInvoker(tx);
+    try{
+     await tx.query('BEGIN ISOLATION LEVEL SERIALIZABLE');await tx.query("SET LOCAL lock_timeout='2000ms'");await tx.query("SET LOCAL statement_timeout='15000ms'");
+     await tx.query("SET LOCAL idle_in_transaction_session_timeout='15000ms'");await executionAdapter.beginScope({client:tx,write:true});
+     const tenant=canonicalHistoryJson(await invoke(resolveTenant,{authContext}));await executionAdapter.assertTenant({client:tx,tenant});
+     const op=(await tx.query(`SELECT * FROM edit_history.operations WHERE shop_id=$1 AND installation_id=$2 AND id=$3 FOR UPDATE`,[tenant.shopId,tenant.installationId,operationId])).rows[0];
+     if(!op)fail(C.UNAUTHORIZED,'Owned history operation required');
+     if(op.purge_requested_at!=null)fail(C.UNAUTHORIZED,'History is being removed');
+     await executionAdapter.lockCommandForEvidence({client:tx,tenant,jobId:op.execution_job_id});
+    await executionAdapter.assertEvidenceAuthority({client:tx,tenant,op});
+     if(await invoke(authorizeRecovery,{authContext,tenant,operation:action,op})!==true)fail(C.UNAUTHORIZED,'Operation finalization authorization required');
+     const context={tx,invoke,tenant,authContext,operationId,op};
+     const result=await callback(context);
+     if(!equal(await invoke(resolveTenant,{authContext}),tenant))fail(C.UNAUTHORIZED,'Installation changed during lifecycle update');
+     await tx.query('SET CONSTRAINTS ALL IMMEDIATE');await tx.query('COMMIT');return result;
+    }catch(error){await tx.query('ROLLBACK').catch(()=>{});if(['40001','40P01','23505','P2002','P2034'].includes(error.code)&&retry<2)continue;throw error;}finally{tx.release();}
+   }
+  }
  async function recoveryPermission(c,action){c.policies.add(action);if(await c.invoke(authorizeRecovery,{authContext:c.authContext,tenant:c.tenant,operation:action,request:c.request})!==true)fail(C.UNAUTHORIZED,'Independent outcome recovery authorization required');}
  async function normalOwner(c){
   const claim=data(c.options.claim,['fenceEpoch','executionClaimId','leaseToken']);
@@ -85,9 +111,9 @@ export function createHistoryLifecycle({database,executionAdapter,resolveTenant,
   WHERE o.shop_id=$1 AND o.installation_id=$2 AND o.id=$3`,c.params.slice(0,3));}
  async function persistAfter(c,change,value){
   if(!equal(value.identity,{shopId:c.tenant.shopId,installationId:c.tenant.installationId,executionJobId:c.op.execution_job_id,executionItemId:change.execution_item_id,mutationId:c.mutationId,resourceGid:change.resource_gid,fieldId:change.field_id}))fail(C.BINDING_CONFLICT,'After snapshot identity differs from the complete mutation request');
-  const before=(await c.tx.query(`SELECT field_resolution_fingerprint FROM edit_history.snapshots WHERE shop_id=$1 AND installation_id=$2 AND change_id=$3 AND snapshot_kind='BEFORE'`,[c.tenant.shopId,c.tenant.installationId,change.id])).rows[0];
-  if(!before||!equal([value.binding.executionFingerprint,value.binding.filterFingerprint,value.binding.fieldResolutionFingerprint,value.binding.fieldDefinitionRevision],
-   [c.op.execution_fingerprint,c.op.filter_fingerprint,before.field_resolution_fingerprint,change.field_definition_revision]))fail(C.BINDING_CONFLICT,'After observation engine coordinates differ from admitted authority');
+  const before=(await c.tx.query(`SELECT field_resolution_fingerprint,binding_mode,generation_id,coverage_revision,mapping_version,execution_snapshot_id
+   FROM edit_history.snapshots WHERE shop_id=$1 AND installation_id=$2 AND change_id=$3 AND snapshot_kind='BEFORE'`,[c.tenant.shopId,c.tenant.installationId,change.id])).rows[0];
+  assertAfterBinding(value.binding,before,c.op,change);
   const existing=(await c.tx.query(`SELECT id,snapshot_fingerprint,evidence_binding_fingerprint FROM edit_history.snapshots
    WHERE shop_id=$1 AND installation_id=$2 AND change_id=$3 AND snapshot_kind='OBSERVED_AFTER' AND observation_id=$4`,[c.tenant.shopId,c.tenant.installationId,change.id,value.observation.observationId])).rows[0];
   if(existing){if(existing.snapshot_fingerprint!==value.fingerprint||existing.evidence_binding_fingerprint!==value.evidenceBindingFingerprint)fail(C.EVIDENCE_CONFLICT,'Observation identity was reused with different evidence');return existing.id;}
@@ -115,6 +141,8 @@ export function createHistoryLifecycle({database,executionAdapter,resolveTenant,
   const evidenceKey=field=>historyMemberKey({resourceGid:field.resourceGid??defaultResourceGid,fieldId:field.fieldId});
   if(!Array.isArray(evidence.fields)||!equal(evidence.fields.map(evidenceKey).sort(),requestMembers(c.request).map(historyMemberKey).sort()))fail(C.EVIDENCE_CONFLICT,'Evidence must cover the entire mutation request');
   if(await c.invoke(verifyMutationEvidence,{authContext:c.authContext,tenant:c.tenant,request:c.request,evidence,operation:verification?'verification':'outcome'})!==true)fail(C.EVIDENCE_REQUIRED,'Mutation evidence is not authenticated');
+  if(c.verifiedNoWrite&&evidence.kind!=='AUTHORITATIVE_NO_WRITE')fail(C.EVIDENCE_REQUIRED,'Verified no-write evidence required');
+  if(evidence.kind==='AUTHORITATIVE_NO_WRITE'&&!c.verifiedNoWrite&&!c.options.recoveryClaim)fail(C.INVALID_TRANSITION,'Verified pre-send no-write transition required');
   const [target,checked]=states[evidence.kind],observations=[];
   for(const change of c.changes){
    const field=evidence.fields.find(f=>evidenceKey(f)===changeMemberKey(change));
@@ -151,34 +179,66 @@ export function createHistoryLifecycle({database,executionAdapter,resolveTenant,
   return Object.freeze({operationId:c.operationId,mutationId:c.mutationId,attemptId:c.attemptId,state:target,observationIds:Object.freeze(observations)});
  }
  const api={
-  completeExecution:raw=>scope(raw,'complete_execution',[],async c=>{
+  completeExecution:raw=>api.finalizeExecutionOperation(raw),
+  finalizeMutationAttempt:raw=>scope(raw,'finalize_mutation_attempt',[],async c=>{
+   await recoveryPermission(c,'finalize_mutation_attempt');
+   const req=(await c.tx.query(`SELECT request_state FROM edit_history.mutation_requests WHERE shop_id=$1 AND installation_id=$2 AND operation_id=$3 AND mutation_id=$4 AND attempt_id=$5`,c.params)).rows[0];
+   if(!req||!terminal.has(req.request_state))return Object.freeze({completed:false,mutationId:c.mutationId,attemptId:c.attemptId});
+   const unresolved=(await c.tx.query(`SELECT count(*)::int AS unresolved FROM edit_history.changes WHERE shop_id=$1 AND installation_id=$2 AND operation_id=$3 AND mutation_id=$4 AND attempt_id=$5 AND mutation_state NOT IN('VERIFIED','FAILED_NO_WRITE','CONFLICT')`,c.params)).rows[0]?.unresolved??0;
+   if(unresolved>0)return Object.freeze({completed:false,mutationId:c.mutationId,attemptId:c.attemptId});
+   return Object.freeze({completed:true,mutationId:c.mutationId,attemptId:c.attemptId,state:req.request_state});
+  }),
+  finalizeExecutionOperation:raw=>(raw.mutationId&&raw.attemptId?scope(raw,'complete_execution',[],async c=>{
    await recoveryPermission(c,'complete_execution');
    const engine=(await c.tx.query(`SELECT status FROM mirror.job_commands WHERE shop_id=$1 AND installation_version=$2 AND id=$3`,[c.tenant.shopId,c.tenant.installationId,c.op.execution_job_id])).rows[0];
-   if(!engine||!['SUCCEEDED','FAILED','CANCELLED'].includes(engine.status))return Object.freeze({completed:false});
+   if(!engine||!['SUCCEEDED','PARTIAL','FAILED','CANCELLED'].includes(engine.status))return Object.freeze({completed:false});
    if((await c.tx.query(`SELECT 1 FROM mirror.job_items WHERE shop_id=$1 AND command_id=$2 AND status IN('PENDING','RETRY','RUNNING') LIMIT 1`,[c.tenant.shopId,c.op.execution_job_id])).rows.length)return Object.freeze({completed:false});
-   const counts=(await c.tx.query(`SELECT count(*)::int AS total,count(*) FILTER(WHERE mutation_state='VERIFIED')::int AS verified,
-    count(*) FILTER(WHERE mutation_state NOT IN('VERIFIED','FAILED_NO_WRITE','CONFLICT'))::int AS unresolved
-    FROM edit_history.changes WHERE shop_id=$1 AND installation_id=$2 AND operation_id=$3`,c.params.slice(0,3))).rows[0];
+   const counts=(await c.tx.query(`SELECT count(*)::int AS total,count(*) FILTER(WHERE mutation_state='VERIFIED')::int AS verified, count(*) FILTER(WHERE mutation_state NOT IN('VERIFIED','FAILED_NO_WRITE','CONFLICT'))::int AS unresolved FROM edit_history.changes WHERE shop_id=$1 AND installation_id=$2 AND operation_id=$3`,c.params.slice(0,3))).rows[0];
    if(!counts.total||counts.unresolved)return Object.freeze({completed:false});
-   const state=engine.status==='CANCELLED'?'CANCELLED':counts.verified===counts.total?'COMPLETED':counts.verified?'PARTIAL':'FAILED';
-   if(!['COMPLETED','PARTIAL','FAILED','CANCELLED'].includes(c.op.operation_state))await c.tx.query(`UPDATE edit_history.operations
-    SET operation_state=$4,completed_at=clock_timestamp(),updated_at=clock_timestamp() WHERE shop_id=$1 AND installation_id=$2 AND id=$3`,[...c.params.slice(0,3),state]);
-   return Object.freeze({completed:true,state});
-  }),
+   const state=engine.status==='CANCELLED'?'CANCELLED':engine.status==='SUCCEEDED'&&counts.verified===counts.total?'COMPLETED':counts.verified?'PARTIAL':'FAILED';
+   if(!['COMPLETED','PARTIAL','FAILED','CANCELLED'].includes(c.op.operation_state))await c.tx.query(`UPDATE edit_history.operations SET operation_state=$4,completed_at=clock_timestamp(),updated_at=clock_timestamp() WHERE shop_id=$1 AND installation_id=$2 AND id=$3`,[...c.params.slice(0,3),state]);
+   return Object.freeze({completed:true,state,operationId:c.operationId});
+  }):operationScope(raw,'complete_execution',async c=>{
+   const engine=(await c.tx.query(`SELECT status FROM mirror.job_commands WHERE shop_id=$1 AND installation_version=$2 AND id=$3`,[c.tenant.shopId,c.tenant.installationId,c.op.execution_job_id])).rows[0];
+   if(!engine||!['SUCCEEDED','PARTIAL','FAILED','CANCELLED'].includes(engine.status))return Object.freeze({completed:false});
+   if((await c.tx.query(`SELECT 1 FROM mirror.job_items WHERE shop_id=$1 AND command_id=$2 AND status IN('PENDING','RETRY','RUNNING') LIMIT 1`,[c.tenant.shopId,c.op.execution_job_id])).rows.length)return Object.freeze({completed:false});
+   const counts=(await c.tx.query(`SELECT count(*)::int AS total,count(*) FILTER(WHERE mutation_state='VERIFIED')::int AS verified, count(*) FILTER(WHERE mutation_state NOT IN('VERIFIED','FAILED_NO_WRITE','CONFLICT'))::int AS unresolved FROM edit_history.changes WHERE shop_id=$1 AND installation_id=$2 AND operation_id=$3`,[c.tenant.shopId,c.tenant.installationId,c.operationId])).rows[0];
+   if(!counts.total||counts.unresolved)return Object.freeze({completed:false});
+   const state=engine.status==='CANCELLED'?'CANCELLED':engine.status==='SUCCEEDED'&&counts.verified===counts.total?'COMPLETED':counts.verified?'PARTIAL':'FAILED';
+   if(!['COMPLETED','PARTIAL','FAILED','CANCELLED'].includes(c.op.operation_state))await c.tx.query(`UPDATE edit_history.operations SET operation_state=$4,completed_at=clock_timestamp(),updated_at=clock_timestamp() WHERE shop_id=$1 AND installation_id=$2 AND id=$3`,[c.tenant.shopId,c.tenant.installationId,c.operationId,state]);
+   return Object.freeze({completed:true,state,operationId:c.operationId});
+  })),
   async discoverOutcomeRecovery(raw){
-   data(raw,['authContext','limit']);if(!raw.authContext)fail(C.UNAUTHORIZED,'Authenticated recovery context required');const limit=positive(raw.limit??25,100);
+   data(raw,['authContext','limit','expectedTenant','executionJobId']);if(!raw.authContext)fail(C.UNAUTHORIZED,'Authenticated recovery context required');const limit=positive(raw.limit??25,100);
+   const executionJobId=raw.executionJobId===undefined?undefined:requireHistoryId(raw.executionJobId);
+   const expectedTenant=raw.expectedTenant===undefined?null:canonicalHistoryJson(data(raw.expectedTenant,['shopId','installationId']));
    const tx=await database.connect(),invoke=createHistoryHookInvoker(tx);let rows;
    try{
     await tx.query('BEGIN');await tx.query("SET LOCAL statement_timeout='15000ms'");await executionAdapter.beginScope({client:tx,write:false});
     const tenant=canonicalHistoryJson(await invoke(resolveTenant,{authContext:raw.authContext}));await executionAdapter.assertTenant({client:tx,tenant});
+    if(expectedTenant&&!equal(tenant,expectedTenant))fail(C.UNAUTHORIZED,'Recovery authentication differs from discovered tenant');
     if(await invoke(authorizeRecovery,{authContext:raw.authContext,tenant,operation:'discover_outcome_recovery'})!==true)fail(C.UNAUTHORIZED,'Recovery discovery is not authorized');
-    rows=await executionAdapter.discoverInterruptedRequests({client:tx,tenant,limit});
+    rows=await executionAdapter.discoverInterruptedRequests({client:tx,tenant,limit,executionJobId});
     if(await invoke(authorizeRecovery,{authContext:raw.authContext,tenant,operation:'discover_outcome_recovery'})!==true||!equal(await invoke(resolveTenant,{authContext:raw.authContext}),tenant))fail(C.UNAUTHORIZED,'Recovery discovery authorization changed');
     await tx.query('COMMIT');
    }catch(error){await tx.query('ROLLBACK').catch(()=>{});throw error;}finally{tx.release();}
    for(const row of rows)await api.scheduleOutcomeRecovery({authContext:raw.authContext,operationId:row.operation_id,mutationId:row.mutation_id,attemptId:row.attempt_id});
    return Object.freeze({scheduledRequests:rows.length});
   },
+  recordVerifiedNoWrite:raw=>scope(raw,'verified_no_write',['evidenceId','dispatchToken','dispatchHandoffKey'],async c=>{
+   await normalOwner(c);
+   if(c.request.dispatch_consumed_at!=null)fail(C.INVALID_TRANSITION,'Consumed dispatch requires outcome recovery');
+   if(c.request.request_state==='DISPATCH_AUTHORIZED'){
+    const token=c.options.dispatchToken;
+    if(typeof token!=='string'||!token||token.length>256||c.request.dispatch_token_hash!=='sha256:'+createHash('sha256').update(token).digest('hex')||
+      c.options.dispatchHandoffKey!==c.request.dispatch_handoff_key||c.changes.some(change=>change.mutation_state!=='DISPATCHING'))
+     fail(C.INVALID_TRANSITION,'Exact unconsumed dispatch handoff required for no-write proof');
+   }else if(c.request.request_state!=='PREPARED'||c.changes.some(change=>change.mutation_state!=='PREPARED')){
+    fail(C.INVALID_TRANSITION,'No-write transition requires a prepared or unconsumed authorized request');
+   }
+   c.verifiedNoWrite=true;
+   return outcome(c,false);
+  }),
   recordMutationOutcome:raw=>scope(raw,'outcome',['evidenceId'],c=>outcome(c,false)),
   recordVerification:raw=>scope(raw,'verification',['evidenceId'],c=>outcome(c,true)),
   scheduleOutcomeRecovery:raw=>scope(raw,'schedule',[],async c=>{await recoveryPermission(c,'schedule_outcome_recovery');if(c.changes.every(x=>terminal.has(x.mutation_state)))return Object.freeze({scheduled:false});await schedule(c);return Object.freeze({scheduled:true,count:c.changes.length});}),

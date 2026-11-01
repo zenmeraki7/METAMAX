@@ -74,3 +74,4 @@ model HistoryChange {
   @@map("changes")
   @@schema("edit_history")
 }
+

@@ -1,7 +1,8 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { FieldError, FIELD_ERROR_CODES as C } from "../fields/types.js";
 import { FILTER_SQL_SCHEMA } from "../fields/sources.js";
-const barrierTransactions = new WeakSet();
+import {lockPublication} from './publication-lock.server.js';
+const barrierTransactions = new WeakMap();
 
 export function invalid(message) {
   throw new FieldError(C.CONTRACT_MISMATCH, message);
@@ -23,13 +24,16 @@ export function token(value) {
   if (typeof value !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(value))
     invalid("Opaque identity required");
 }
-/** Coarse existing barrier; acquire BEFORE any protected data read. LOCK itself
- * fails outside an explicit transaction, preventing autocommit callers. */
-export async function lockMirror(client) {
-  if (barrierTransactions.has(client)) return;
-  await client.query("LOCK TABLE mirror.publications IN ACCESS EXCLUSIVE MODE");
+/** Scope is resolved by trusted services before protected reads or writes. */
+export async function lockMirror(client, shopId) {
+  shop(shopId);
+  if (barrierTransactions.get(client) === shopId) return;
+  if (barrierTransactions.has(client)) invalid('One mirror shop per transaction');
+  await lockPublication(client,shopId,{write:true});
+  // Only transaction facades are cached; raw pooled clients are never cached.
+  if (Object.hasOwn(client,'mirrorTransaction')) barrierTransactions.set(client,shopId);
 }
-export async function transaction(database, callback) {
+export async function transaction(database, callback, shopId) {
   for (let attempt = 0; ; attempt++) {
     const client = await database.connect();
     let discard;
@@ -41,12 +45,12 @@ export async function transaction(database, callback) {
       // connection. Nested services can avoid reacquiring an already-held lock
       // without accidentally reusing that proof after COMMIT or pool release.
       let open = true;
-      const scoped = {query(...args) {
+      const scoped = {mirrorTransaction:true,query(...args) {
         if (!open) throw new Error('Mirror transaction has ended');
         return client.query(...args);
       }};
-      await lockMirror(scoped);
-      barrierTransactions.add(scoped);
+      await scoped.query('LOCK TABLE mirror.publications IN ACCESS SHARE MODE');
+      if (shopId !== undefined) await lockMirror(scoped,shopId);
       let result;
       try { result = await callback(scoped); }
       finally { open = false;barrierTransactions.delete(scoped); }
@@ -79,7 +83,7 @@ export async function staging(
 ) {
   shop(shopId);
   token(generationId);
-  await lockMirror(client);
+  await lockMirror(client,shopId);
   const row = (
     await client.query(
       `SELECT * FROM mirror.generations

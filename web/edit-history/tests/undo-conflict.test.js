@@ -28,3 +28,14 @@ test('undo rejects missing, duplicate and mismatched resource/field observations
  const observations=current();observations[0]={...observations[1]};assert.throws(()=>detectUndoConflicts({fields,observations}));
  observations[0]={...observations[0],resourceGid:'foreign'};assert.throws(()=>detectUndoConflicts({fields,observations}));
 });
+
+test('two variants sharing variant.price retain separate observations and inverse values',()=>{
+ const variants=[{resourceGid:'gid://shopify/ProductVariant/1',fieldId:'variant.price',before:snapshot('10'),after:snapshot('20')},
+  {resourceGid:'gid://shopify/ProductVariant/2',fieldId:'variant.price',before:snapshot('30'),after:snapshot('40')}];
+ const observations=variants.map(f=>({resourceGid:f.resourceGid,fieldId:f.fieldId,...f.after})).reverse();
+ const inverse=detectUndoConflicts({fields:variants,observations}).inverse;
+ assert.deepEqual(inverse.map(f=>[f.resourceGid,f.value]),[['gid://shopify/ProductVariant/1','10'],['gid://shopify/ProductVariant/2','30']]);
+ observations[0].value='Merchant change';
+ const skipped=detectUndoConflicts({fields:variants,observations,conflictPolicy:'SKIP_CONFLICTED'});
+ assert.deepEqual(skipped.inverse.map(f=>f.resourceGid),['gid://shopify/ProductVariant/1']);
+});

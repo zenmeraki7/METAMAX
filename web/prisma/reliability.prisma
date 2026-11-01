@@ -1,6 +1,8 @@
 // METAMAX reliability domain. Loaded through prisma.config.mjs.
 
 model OutboxEvent {
+  reviewRequired Boolean @default(false) @map("review_required")
+  lastError String? @map("last_error") @db.Text
   id           BigInt     @id @default(autoincrement())
   shopId       String     @map("shop_id") @db.Text
   commandId    BigInt     @map("command_id")

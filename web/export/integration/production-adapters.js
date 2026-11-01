@@ -1,3 +1,6 @@
+import express from 'express';
+import {createExportControlAdapter} from '../export-control-adapter.server.js';
+import {createExportControlRouter} from '../export-control.routes.js';
 /** Real PostgreSQL + real production source/storage/evidence/worker code.
  * S3 and queue wire transports are test-only; their verification is not mocked.
  */
@@ -78,12 +81,20 @@ export async function testProductionExportAdapters(t,pool) {
       assert.equal(done.generation_id,generationId);
       const artifact=(await query("SELECT * FROM export_engine.artifacts WHERE job_id=$1",[created.job.id])).rows[0];
       assert.equal(artifact.row_count,"2");assert.ok(artifact.storage_version);
-      await source.authorizeDownload({authContext,job:done});
+      const app=express();app.use('/api/exports',createExportControlRouter({authentication:{authenticate:async()=>authContext},source,
+        controlRepository:createExportControlAdapter(repository),storage,database:pool}));
+      const server=app.listen(0,'127.0.0.1');await new Promise(resolve=>server.once('listening',resolve));
+      try{
+        const root=`http://127.0.0.1:${server.address().port}/api/exports/${done.id}`;
+        const status=await fetch(root);assert.equal(status.status,200);assert.equal((await status.json()).data.state,'COMPLETED');
+        const download=await fetch(`${root}/download`);assert.equal(download.status,200);assert.ok((await download.arrayBuffer()).byteLength>0);
+      }finally{await new Promise(resolve=>server.close(resolve));}
+      await source.authorizeDownload({authContext,job:await createExportControlAdapter(repository).getJob({identity:{shopId,installationId},jobId:done.id})});
       const opened=await storage.openRegisteredArtifact({...common,artifact});let downloaded=0;
       for await(const chunk of opened)downloaded+=chunk.length;
       assert.equal(String(downloaded),artifact.byte_count);
       session.scope="";
-      await assert.rejects(()=>source.authorizeDownload({authContext,job:done}),{code:F.PERMISSION_DENIED});
+      await assert.rejects(async()=>source.authorizeDownload({authContext,job:await createExportControlAdapter(repository).getJob({identity:{shopId,installationId},jobId:done.id})}),{code:F.PERMISSION_DENIED});
       session.scope="read_products";
       const count=transport.objects.size;
       assert.deepEqual(await worker.process(delivery),{skipped:true});assert.equal(transport.objects.size,count);
@@ -159,7 +170,7 @@ export async function testProductionExportAdapters(t,pool) {
       const stopped=await repository.getJob(common);assert.equal(stopped.state,"FAILED");assert.equal(stopped.installation_id,installationId);
       await repository.releaseTerminalGenerationProtections();
       assert.equal((await query("SELECT 1 FROM mirror.generation_read_leases WHERE id=$1",[stopped.generation_lease_id])).rowCount,0);
-      await assert.rejects(()=>source.authorizeDownload({authContext,job:stopped}),{code:"EXPORT_UNAUTHORIZED"});
+      await assert.rejects(async()=>source.authorizeDownload({authContext,job:await createExportControlAdapter(repository).getJob(common)}),{code:"EXPORT_UNAUTHORIZED"});
       await assert.rejects(()=>service.create({authContext,idempotencyKey:"export:old-generation-new-install",input:{format:"CSV",fieldIds:["product.title"]}}),{code:"EXPORT_SNAPSHOT_EXPIRED"});
     });
     await worker.stop();

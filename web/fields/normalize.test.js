@@ -268,6 +268,22 @@ test("decimal BETWEEN compares exactly", () => {
       ["0.20", "0.10"]
     )
   );
+
+  expectInvalid(() =>
+    normalizeOperatorOperand(
+      fields.price,
+      "between",
+      ["0.10"]
+    )
+  );
+
+  expectInvalid(() =>
+    normalizeOperatorOperand(
+      fields.price,
+      "between",
+      []
+    )
+  );
 });
 
 // --------------------------------------------------
@@ -587,7 +603,7 @@ test("operator strings obey length bounds", () => {
 // --------------------------------------------------
 
 test("contract version remains stable", () => {
-  assert.equal(NORMALIZE_CONTRACT_VERSION, 1);
+  assert.equal(NORMALIZE_CONTRACT_VERSION, 2);
 });
 
 test("rejects invented canonical field IDs", () => {
@@ -671,3 +687,36 @@ test("decimal operators preserve exact strings for scalar, set and pair shapes",
   }
   assert.equal(normalizeOperatorOperand(price, "is_null", undefined, { hasValue: false }), undefined);
 });
+
+test("Phase 1: same-row structured field operands normalize and validate strictly", () => {
+  const price = CANONICAL_FIELDS["variant.price"];
+  const title = CANONICAL_FIELDS["product.title"];
+  const productId = CANONICAL_FIELDS["product.id"];
+
+  // Approved comparisons
+  for (const op of ["lt", "eq", "gt"]) {
+    const operand = { kind: "field", field: "variant.compareAtPrice" };
+    const result = normalizeOperatorOperand(price, op, operand);
+    assert.deepEqual(result, { kind: "field", field: "variant.compareAtPrice" });
+    assert.ok(Object.isFrozen(result));
+  }
+
+  // Malformed field operands
+  expectInvalid(() => normalizeOperatorOperand(price, "lt", { kind: "field", field: "variant.compareAtPrice", extra: true }));
+  expectInvalid(() => normalizeOperatorOperand(price, "lt", { kind: "not_a_field", field: "variant.compareAtPrice" }));
+  expectInvalid(() => normalizeOperatorOperand(price, "lt", { kind: "field", field: 123 }));
+  expectInvalid(() => normalizeOperatorOperand(price, "lt", { kind: "field" }));
+  expectInvalid(() => normalizeOperatorOperand(price, "lt", { field: "variant.compareAtPrice" }));
+
+  // Unapproved field-to-field comparisons
+  expectInvalid(() => normalizeOperatorOperand(price, "lt", { kind: "field", field: "variant.sku" }));
+  expectInvalid(() => normalizeOperatorOperand(price, "lt", { kind: "field", field: "product.title" }));
+  expectInvalid(() => normalizeOperatorOperand(title, "eq", { kind: "field", field: "variant.compareAtPrice" }));
+  assert.throws(() => normalizeOperatorOperand(price, "contains", { kind: "field", field: "variant.compareAtPrice" }), { code: FIELD_ERROR_CODES.UNSUPPORTED_OPERATION });
+  expectInvalid(() => normalizeOperatorOperand(price, "between", { kind: "field", field: "variant.compareAtPrice" }));
+
+  // Empty set for in operator is strictly rejected
+  expectInvalid(() => normalizeOperatorOperand(productId, "in", []));
+  expectInvalid(() => normalizeOperatorOperand(price, "in", []));
+});
+

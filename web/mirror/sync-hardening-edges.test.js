@@ -26,14 +26,9 @@ test("remote bulk cancellation persists local fencing before an uncertain extern
       },
     },
   });
-  await assert.rejects(
-    () =>
-      runner.cancelBulkCatalogExport({
-        shopId: "unit.myshopify.com",
-        runId: "1",
-      }),
-    /connection lost/,
-  );
+  const outcome=await runner.cancelBulkCatalogExport({shopId:'unit.myshopify.com',runId:'1'});
+  assert.equal(outcome.cancelled,false);assert.equal(outcome.cancelPending,true);
+  assert.equal(outcome.outcomeUncertain,true);assert.equal(outcome.state,'CANCELLATION_REQUESTED');
   assert.deepEqual(calls, ["cancelled"]);
 });
 

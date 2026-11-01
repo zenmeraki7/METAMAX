@@ -1,11 +1,14 @@
+import {historyOperationPresentation,historyStatusPresentation} from '../shared/history-operation-contract.js';
 /**
  * METAMAX — Edit History Express Routes
  *
  * Exposes /api/history and /api/history/:id over authenticated HTTP sessions,
- * backed by PostgreSQL edit_history and mirror.job_commands tables.
+ * through installation-scoped, independently authorized repository reads.
  */
 
 import express from "express";
+import { createHistoryReadService } from "./history-read.server.js";
+import { HistoryContractError, HISTORY_ERROR_CODES as C } from "./history-contract.js";
 
 function formatDuration(start, end) {
   if (!start || !end) return null;
@@ -17,213 +20,91 @@ function formatDuration(start, end) {
   return `${minutes}m ${remainingSecs}s`;
 }
 
-function mapStatus(rawStatus) {
-  switch ((rawStatus || "").toUpperCase()) {
-    case "SUCCEEDED":
-    case "COMPLETED":
-      return "Completed";
-    case "RUNNING":
-      return "In Progress";
-    case "CANCELLED":
-      return "Cancelled";
-    case "FAILED":
-      return "Failed";
-    default:
-      return "Pending";
+function mapStatus(rawStatus, logger) {
+  const status=historyStatusPresentation(rawStatus);
+  if(status==='Unknown'){
+    try { logger?.error?.({code:'HISTORY_STATUS_UNRECOGNIZED'},'Unknown history operation state'); } catch {}
   }
+  return status;
 }
 
-function mapType(rawKind) {
-  switch ((rawKind || "").toLowerCase()) {
-    case "undo":
-      return "Undo";
-    case "export":
-      return "Export";
-    case "import":
-      return "Import";
-    default:
-      return "Edit";
+function mapType(rawKind) {return historyOperationPresentation(rawKind).type;}
+
+function boundedQuery(query, defaultLimit) {
+  if (Object.keys(query).some(key => !["limit", "cursor"].includes(key)) ||
+      Object.values(query).some(value => typeof value !== "string")) {
+    throw new HistoryContractError(C.INVALID_INPUT, "Invalid history query");
   }
+  const limit = query.limit === undefined ? defaultLimit : Number(query.limit);
+  if (query.limit !== undefined && !/^[1-9][0-9]{0,2}$/.test(query.limit) ||
+      !Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+    throw new HistoryContractError(C.INVALID_INPUT, "Invalid history page size");
+  }
+  return {limit, ...(query.cursor === undefined ? {} : {cursor:query.cursor})};
+}
+function count(value) {
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number < 0) throw new HistoryContractError(C.LIMIT_EXCEEDED, "History count exceeds response contract");
+  return number;
+}
+function summary(operation, logger) {
+  return {id:operation.operationId,
+    title:historyOperationPresentation(operation.operationKind).title,
+    type:mapType(operation.operationKind),status:mapStatus(operation.state,logger),
+    processedCount:count(operation.counts.verified),totalCount:count(operation.counts.recorded),
+    countUnit:'fields',
+    failedCount:count(operation.counts.failed),uncertainCount:count(operation.counts.uncertain),
+    startedAt:operation.createdAt,duration:formatDuration(operation.createdAt,operation.completedAt),user:"Merchant Admin"};
 }
 
-export function createHistoryRouter({ database, authentication, logger = console } = {}) {
+/** GET list/detail/change pages accept bounded cursor queries and opaque current
+ * request authority. The read service independently enforces installation and
+ * read permission. Outputs contain counts/metadata, never snapshot values.
+ * No durable writes: Partial is distinct from Failed; unsupported states are
+ * Unknown and emit a contract-mismatch diagnostic. Counts remain field counts.
+ */
+export function createHistoryRouter({database,authentication,logger=console,
+  cursorSecret=process.env.HISTORY_CURSOR_SECRET || process.env.FILTER_CURSOR_SECRET || process.env.SHOPIFY_API_SECRET,
+  historyReadService}={}) {
   const router = express.Router();
-
-  router.use((_req, res, next) => {
-    res.setHeader("Cache-Control", "private, no-store");
-    next();
-  });
-
-  const unavailable = (_req, res) =>
-    res.status(503).json({
-      error: "HISTORY_UNAVAILABLE",
-      message: "History service is currently unavailable",
-      retryable: true,
-    });
-
-  if (!database) {
-    router.use(unavailable);
-    return router;
+  const service = historyReadService ?? (database && cursorSecret
+    ? createHistoryReadService({database,authentication,cursorSecret}) : null);
+  router.use((_req,res,next) => {res.setHeader("Cache-Control","private, no-store");next();});
+  function handle(action) {
+    return async (req,res,next) => {
+      try {
+        const authContext = await authentication.authenticate(req);
+        if (!authContext) return res.status(401).json({error:"UNAUTHENTICATED"});
+        if (!service) return res.status(503).json({error:"HISTORY_UNAVAILABLE",retryable:true});
+        const options = boundedQuery(req.query,action === "listChanges" ? 50 : 25);
+        if (action === "getOperation" && Object.keys(req.query).length) {
+          throw new HistoryContractError(C.INVALID_INPUT,"Operation detail does not accept query parameters");
+        }
+        const result = await service[action]({authContext,...options,
+          ...(action === "listOperations" ? {} : {operationId:req.params.id})});
+        if (action === "getOperation") {
+          if (!result) return res.status(404).json({error:"OPERATION_NOT_FOUND"});
+          return res.json({operation:{id:result.operationId,title:historyOperationPresentation(result.operationKind).title,type:mapType(result.operationKind),status:mapStatus(result.state,logger),countUnit:'fields',
+            changesRecorded:count(result.counts.recorded),changesVerified:count(result.counts.verified),changesFailed:count(result.counts.failed),
+            changesUncertain:count(result.counts.uncertain),
+            createdAt:result.createdAt,completedAt:result.completedAt}});
+        }
+        const pageInfo={hasNextPage:result.nextCursor !== null,endCursor:result.nextCursor};
+        return action === "listOperations"
+          ? res.json({operations:result.items.map(item=>summary(item,logger)),pageInfo})
+          : res.json({changes:result.items.map(item=>({id:item.changeId,resourceGid:item.resourceGid,fieldId:item.fieldId,
+              mutationState:item.state,verificationState:item.verificationState,preparedAt:item.preparedAt})),pageInfo});
+      } catch(error) {
+        if (res.headersSent) return next(error);
+        if (error instanceof HistoryContractError) return res.status(error.status).json({error:error.code});
+        if (error?.code === "FIELD_PERMISSION_DENIED") return res.status(403).json({error:"HISTORY_UNAUTHORIZED"});
+        logger.error?.({code:error.code},"History read failed");
+        return res.status(503).json({error:"HISTORY_UNAVAILABLE",retryable:true});
+      }
+    };
   }
-
-  // GET /: Paginated operation list for the authenticated shop
-  router.get("/", async (req, res, next) => {
-    try {
-      const authContext = await authentication.authenticate(req);
-      if (!authContext) {
-        return res.status(401).json({ error: "UNAUTHENTICATED" });
-      }
-
-      const shopId = authContext.shopId || authContext.shop;
-      if (!shopId) {
-        return res.status(401).json({ error: "UNAUTHORIZED_TENANT" });
-      }
-
-      const limit = Math.min(Math.max(1, Number(req.query.limit) || 25), 100);
-      const cursor = req.query.cursor ? String(req.query.cursor) : null;
-
-      const params = [shopId, limit + 1];
-      let cursorClause = "";
-      if (cursor && /^\d{4}-\d{2}-\d{2}T/.test(cursor)) {
-        params.push(cursor);
-        cursorClause = `AND o.created_at < $3::timestamptz`;
-      }
-
-      const query = `
-        SELECT 
-          o.id,
-          o.shop_id,
-          o.operation_kind,
-          o.operation_state,
-          o.changes_recorded,
-          o.changes_verified,
-          o.changes_failed,
-          o.created_at,
-          o.completed_at,
-          o.actor_reference,
-          c.kind AS command_kind,
-          c.status AS command_status,
-          c.checkpoint
-        FROM edit_history.operations o
-        LEFT JOIN mirror.job_commands c ON c.shop_id = o.shop_id AND c.id = o.execution_job_id
-        WHERE o.shop_id = $1
-          AND o.purge_requested_at IS NULL
-          ${cursorClause}
-        ORDER BY o.created_at DESC
-        LIMIT $2
-      `;
-
-      const result = await database.query(query, params);
-      const hasMore = result.rows.length > limit;
-      const visible = hasMore ? result.rows.slice(0, limit) : result.rows;
-
-      const operations = visible.map(row => {
-        const title = row.checkpoint?.title || 
-          (row.operation_kind === "undo" ? "Undo Operation" : "Bulk Product Edit");
-        return {
-          id: String(row.id),
-          title,
-          type: mapType(row.command_kind || row.operation_kind),
-          status: mapStatus(row.command_status || row.operation_state),
-          processedCount: Number(row.changes_verified || 0),
-          totalCount: Number(row.changes_recorded || 0),
-          startedAt: row.created_at?.toISOString?.() || String(row.created_at),
-          duration: formatDuration(row.created_at, row.completed_at),
-          user: row.actor_reference || "Merchant Admin",
-        };
-      });
-
-      const nextCursor = hasMore && visible.length > 0
-        ? visible[visible.length - 1].created_at?.toISOString?.() || null
-        : null;
-
-      return res.json({
-        operations,
-        pageInfo: {
-          hasNextPage: hasMore,
-          endCursor: nextCursor,
-        },
-      });
-    } catch (error) {
-      logger.error?.({ error: error.message || error }, "Failed to fetch history operations");
-      if (res.headersSent) return next(error);
-      return res.status(500).json({ error: "INTERNAL_SERVER_ERROR", message: "Failed to load operation history" });
-    }
-  });
-
-  // GET /:id: Operation details
-  router.get("/:id", async (req, res, next) => {
-    try {
-      const authContext = await authentication.authenticate(req);
-      if (!authContext) return res.status(401).json({ error: "UNAUTHENTICATED" });
-
-      const shopId = authContext.shopId || authContext.shop;
-      const operationId = req.params.id;
-
-      const query = `
-        SELECT o.*, c.status AS command_status, c.checkpoint
-        FROM edit_history.operations o
-        LEFT JOIN mirror.job_commands c ON c.shop_id = o.shop_id AND c.id = o.execution_job_id
-        WHERE o.shop_id = $1 AND o.id = $2 AND o.purge_requested_at IS NULL
-        LIMIT 1
-      `;
-      const result = await database.query(query, [shopId, operationId]);
-      if (!result.rows.length) {
-        return res.status(404).json({ error: "OPERATION_NOT_FOUND" });
-      }
-
-      const row = result.rows[0];
-      return res.json({
-        operation: {
-          id: String(row.id),
-          type: mapType(row.operation_kind),
-          status: mapStatus(row.command_status || row.operation_state),
-          changesRecorded: Number(row.changes_recorded || 0),
-          changesVerified: Number(row.changes_verified || 0),
-          changesFailed: Number(row.changes_failed || 0),
-          createdAt: row.created_at,
-          completedAt: row.completed_at,
-        },
-      });
-    } catch (error) {
-      if (res.headersSent) return next(error);
-      return res.status(500).json({ error: "INTERNAL_SERVER_ERROR" });
-    }
-  });
-
-  // GET /:id/changes: Changes list
-  router.get("/:id/changes", async (req, res, next) => {
-    try {
-      const authContext = await authentication.authenticate(req);
-      if (!authContext) return res.status(401).json({ error: "UNAUTHENTICATED" });
-
-      const shopId = authContext.shopId || authContext.shop;
-      const operationId = req.params.id;
-      const limit = Math.min(Math.max(1, Number(req.query.limit) || 50), 200);
-
-      const query = `
-        SELECT id, resource_gid, field_id, mutation_state, verification_state, prepared_at
-        FROM edit_history.changes
-        WHERE shop_id = $1 AND operation_id = $2
-        ORDER BY prepared_at DESC, id DESC
-        LIMIT $3
-      `;
-      const result = await database.query(query, [shopId, operationId, limit]);
-      return res.json({
-        changes: result.rows.map(r => ({
-          id: String(r.id),
-          resourceGid: r.resource_gid,
-          fieldId: r.field_id,
-          mutationState: r.mutation_state,
-          verificationState: r.verification_state,
-          preparedAt: r.prepared_at,
-        })),
-      });
-    } catch (error) {
-      if (res.headersSent) return next(error);
-      return res.status(500).json({ error: "INTERNAL_SERVER_ERROR" });
-    }
-  });
-
+  router.get("/",handle("listOperations"));
+  router.get("/:id",handle("getOperation"));
+  router.get("/:id/changes",handle("listChanges"));
   return router;
 }

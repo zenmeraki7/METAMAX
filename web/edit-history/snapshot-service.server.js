@@ -25,6 +25,12 @@ import { normalizeFieldValue } from "../fields/normalize.js";
 import { CANONICAL_REGISTRY_INFO } from "../fields/canonical.js";
 import { assertAuthorizedFilterService } from "../filters/validate.js";
 import { fingerprintFilterAst } from "../filters/fingerprint.js";
+import {isDeepStrictEqual} from 'node:util';
+import {NORMALIZE_CONTRACT_VERSION} from '../fields/normalize.js';
+import {CONSTRAINTS_VERSION} from '../fields/constraints.js';
+import {OPERATOR_CONTRACT_VERSION} from '../fields/operators.js';
+import {FILTER_BINDING_VERSION} from '../filters/bindings.js';
+import {FILTER_VALIDATION_VERSION} from '../filters/contracts.js';
 import {
   HISTORY_ERROR_CODES as C, HistoryContractError,
   normalizeHistoryIdentity, normalizeHistoryBinding,
@@ -72,6 +78,21 @@ export function createHistorySnapshotService({ fieldService, filterService } = {
     fieldService.assertResolution(input.fieldResolution);
     const fieldResolution = await fieldService.revalidateResolution(input.fieldResolution, { authContext: input.authContext });
     const filter = await filterService.revalidateFilter(input.validatedFilter, { authContext: input.authContext });
+    // Filter and mutation fields may differ. Resolve the filter's exact field
+    // set again, then compare its complete issued read-resolution identity.
+    const plan=filterService.getResolutionPlan(filter);
+    if(!isDeepStrictEqual(filter.versions,{validation:FILTER_VALIDATION_VERSION,ast:1,canonical:CANONICAL_REGISTRY_INFO.registryVersion,
+      operators:OPERATOR_CONTRACT_VERSION,bindings:FILTER_BINDING_VERSION,normalization:NORMALIZE_CONTRACT_VERSION,constraints:CONSTRAINTS_VERSION})||
+      !isDeepStrictEqual(plan.versions,filter.versions))reject('Filter code version coordinates differ');
+    const readResolution=await fieldService.requireFields({authContext:input.authContext,fieldIds:plan.fieldIds,access:'read',operation:fieldResolution.operation,
+      executionContext:{phase:fieldResolution.phase,operationId:fieldResolution.operationId,generationId:fieldResolution.generationId,
+       coverageRevision:fieldResolution.coverageRevision,approvedTargetingSnapshot:{shopId:fieldResolution.shopId,snapshotId:fieldResolution.targetingSnapshotId,
+        generationId:fieldResolution.generationId,coverageRevision:fieldResolution.coverageRevision}}});
+    if(readResolution.registryVersion!==filter.registryVersion||!isDeepStrictEqual(readResolution.definitionRevisions,filter.definitionRevisions)||
+      !isDeepStrictEqual(readResolution.fields,plan.fields)||!isDeepStrictEqual([...readResolution.datasets].sort(),plan.datasets))reject('Complete filter field-resolution identity differs');
+    if(!isDeepStrictEqual(fieldResolution.definitionRevisions,input.fieldResolution.definitionRevisions)||
+      fieldResolution.registryVersion!==input.fieldResolution.registryVersion||fieldResolution.writeCapabilityVersion!==input.fieldResolution.writeCapabilityVersion||
+      !isDeepStrictEqual(fieldResolution.fields,input.fieldResolution.fields))reject('Complete write field-resolution identity changed');
     const identity = normalizeHistoryIdentity(input.identity);
     if (fieldResolution.shopId !== identity.shopId || fieldResolution.access !== "write" ||
         fieldResolution.phase !== "execute" || !EDIT_OPERATIONS.has(fieldResolution.operation) ||

@@ -19,80 +19,17 @@ async function readResponse(response) {
 }
 
 export async function fetchShopifyData({ signal } = {}) {
-  // Try /api/shopify-data/sources first
-  try {
-    const response = await fetch(`${BASE}/sources`, {
-      method: "GET",
-      credentials: "same-origin",
-      cache: "no-store",
-      headers: {
-        Accept: "application/json",
-      },
-      signal,
-    });
-
-    if (response.ok) {
-      const payload = await readResponse(response);
-      if (Array.isArray(payload.sources) && typeof payload.shopTimeZone === "string") {
-        return payload;
-      }
-    }
-  } catch {
-    // Fall back to checking mirror status
-  }
-
-  // Fallback: Query mirror status and compose active source status
-  const statusRes = await fetch("/api/mirror/status", {
-    method: "GET",
-    credentials: "same-origin",
-    cache: "no-store",
-    headers: { Accept: "application/json" },
-    signal,
-  });
-
-  const mirror = await readResponse(statusRes);
-  const isReady = mirror.syncStatus === "READY";
-
-  return {
-    shopTimeZone: "UTC",
-    sources: [
-      {
-        id: "products",
-        name: "Products & Variants",
-        icon: "bag",
-        syncType: "automatic",
-        status: isReady ? "healthy" : "syncing",
-        lastFullSyncAt: new Date().toISOString(),
-      },
-      {
-        id: "collections",
-        name: "Collections",
-        icon: "layers",
-        syncType: "automatic",
-        status: isReady ? "healthy" : "syncing",
-        lastFullSyncAt: new Date().toISOString(),
-      },
-      {
-        id: "inventory",
-        name: "Inventory Levels",
-        icon: "box",
-        syncType: "automatic",
-        status: isReady ? "healthy" : "syncing",
-        lastFullSyncAt: new Date().toISOString(),
-      },
-      {
-        id: "metafields",
-        name: "Metafield Definitions",
-        icon: "receipt",
-        syncType: "automatic",
-        status: isReady ? "healthy" : "syncing",
-        lastFullSyncAt: new Date().toISOString(),
-      },
-    ],
-  };
+  const response=await fetch(`${BASE}/sources`,{method:'GET',credentials:'same-origin',cache:'no-store',headers:{Accept:'application/json'},signal});
+  const payload=await readResponse(response);
+  const statuses=['healthy','queued','running','failed','cancelled','unavailable'];
+  if(!Array.isArray(payload.sources)||payload.sources.length>32||typeof payload.shopTimeZone!=='string'||payload.sources.some(source=>
+    !source||typeof source.id!=='string'||typeof source.name!=='string'||!statuses.includes(source.status)||
+    !(source.lastFullSyncAt===null||typeof source.lastFullSyncAt==='string'&&Number.isFinite(Date.parse(source.lastFullSyncAt)))))throw new Error('Invalid source status response');
+  return payload;
 }
 
 export async function requestShopifyRefresh(sourceId = null) {
+  if(sourceId!==null && sourceId!=="products")throw new Error("This data source is not available for refresh.");
   // Trigger mirror sync via /api/mirror/sync
   const response = await fetch("/api/mirror/sync", {
     method: "POST",

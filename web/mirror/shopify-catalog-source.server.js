@@ -1,5 +1,7 @@
 import { invalid, shop } from "./transactions.server.js";
 import { validateProducts } from "./catalog-writer.server.js";
+import {isValidShopifySession} from '../middleware/session-validation.js';
+import {hasCurrentProductRead} from '../middleware/product-permission.server.js';
 
 export const PRODUCT_SNAPSHOT_QUERY = `query MirrorProductSnapshot($id: ID!, $after: String) {
   product(id: $id) {
@@ -15,9 +17,7 @@ export const PRODUCT_SNAPSHOT_QUERY = `query MirrorProductSnapshot($id: ID!, $af
 
 export function assertCatalogSession(session, shopId) {
   shop(shopId);
-  if (!session || session.shop !== shopId || !session.accessToken ||
-      (session.expires && (!Number.isFinite(new Date(session.expires).getTime()) || new Date(session.expires).getTime() <= Date.now())) ||
-      !String(session.scope ?? "").split(",").some(scope => ["read_products", "write_products"].includes(scope.trim()))) {
+  if (!isValidShopifySession(session) || session.shop !== shopId || !hasCurrentProductRead(session)) {
     invalid("Current product-read session required");
   }
   return session;
@@ -54,7 +54,7 @@ export async function readCompleteProduct({ client, productId, signal }) {
   const cursors = new Set();
   do {
     signal?.throwIfAborted();
-    const response = await client.request(PRODUCT_SNAPSHOT_QUERY, { variables: { id: productId, after: after ?? null } });
+    const response = await client.request(PRODUCT_SNAPSHOT_QUERY, { variables: { id: productId, after: after ?? null },signal });
     if (response.errors || !response.data || !Object.hasOwn(response.data, "product")) invalid("Incomplete product response");
     const current = response.data.product;
     if (current === null && !product) return { complete: true, product: null };
@@ -66,7 +66,7 @@ export async function readCompleteProduct({ client, productId, signal }) {
     product.variants.push(...variants.nodes);
     if (product.variants.length > 2048) invalid("Variant count limit exceeded");
     after = variants.pageInfo.hasNextPage ? variants.pageInfo.endCursor : undefined;
-    if (after !== undefined) {
+    if (variants.pageInfo.hasNextPage) {
       if (typeof after !== "string" || !after || cursors.has(after) || !variants.nodes.length) invalid("Variant pagination did not advance");
       cursors.add(after);
     }
@@ -76,7 +76,7 @@ export async function readCompleteProduct({ client, productId, signal }) {
   return { complete: true, product: result };
 }
 
-export async function openBulkExport(op, { fetchImpl = fetch, signal } = {}) {
+export async function openBulkExport(op, { fetchImpl = fetch, signal, headers, returnResponse=false } = {}) {
   if (op.status !== "COMPLETED" || !/^(0|[1-9][0-9]*)$/.test(String(op.objectCount)) ||
       (typeof op.objectCount === "number" && !Number.isSafeInteger(op.objectCount))) invalid("Completed export required");
   if (String(op.objectCount) === "0" && op.url == null) return [];
@@ -86,7 +86,7 @@ export async function openBulkExport(op, { fetchImpl = fetch, signal } = {}) {
         url.hostname.endsWith(".shopifycloud.com") || url.hostname.endsWith(".s3.amazonaws.com"))) {
     invalid("Untrusted bulk export URL");
   }
-  const response = await fetchImpl(url.href, { redirect: "error", signal });
+  const response = await fetchImpl(url.href, { redirect: "error", signal, ...(headers?{headers}:{}) });
   if (!response.ok || !response.body) invalid("Bulk export download failed");
-  return response.body;
+  return returnResponse?response:response.body;
 }

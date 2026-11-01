@@ -1,12 +1,13 @@
-/** Publication barrier for read-only repeatable-read execution.
+/** Shop-scoped publication barrier for READ COMMITTED execution.
  * The configured relation is an EXISTING server-owned barrier, not a schema
  * declaration. Every publisher, coverage writer, mirror mutator and reclaimer
  * must acquire lockForWrite before reading or changing its protected state.
- * This coarse barrier serializes writers across all tenants using the relation.
+ * Only writers for the same authenticated shop conflict with a reader.
  */
 import { quoteQualifiedTable } from "../filters/mirror-schema.js";
 import { createMirrorCoverageService } from "./coverage.js";
 import { FieldError, FIELD_ERROR_CODES as C } from "../fields/types.js";
+import {lockPublication} from './publication-lock.server.js';
 
 export function createMirrorPublicationService({
   repository,
@@ -26,9 +27,9 @@ export function createMirrorPublicationService({
   }
 
   return Object.freeze({
-    async lockForRead(client) {
+    async lockForRead(client,shopId) {
       requireClient(client);
-      await client.query(`LOCK TABLE ${relation} IN ACCESS SHARE MODE`);
+      await lockPublication(client,shopId,{relation});
     },
 
     async requirePublished({
@@ -39,9 +40,9 @@ export function createMirrorPublicationService({
       datasets,
     }) {
       requireClient(client);
-      // Must be the transaction's first data-dependent statement. ACCESS SHARE
-      // is allowed in READ ONLY and conflicts with the writer's ACCESS EXCLUSIVE.
-      await client.query(`LOCK TABLE ${relation} IN ACCESS SHARE MODE`);
+      // Acquire before the first protected read. READ COMMITTED takes a fresh
+      // data snapshot after any wait for this shop's writer.
+      await lockPublication(client,shopId,{relation});
       const coverage = createMirrorCoverageService({
         repository: {
           getPublishedSnapshot: (input) =>
@@ -61,10 +62,10 @@ export function createMirrorPublicationService({
       return receipt;
     },
 
-    async lockForWrite(client) {
+    async lockForWrite(client,shopId) {
       requireClient(client);
       // The caller owns BEGIN/COMMIT/ROLLBACK; the lock lasts until transaction end.
-      await client.query(`LOCK TABLE ${relation} IN ACCESS EXCLUSIVE MODE`);
+      await lockPublication(client,shopId,{write:true,relation});
     },
 
     async publishGeneration({
@@ -79,7 +80,7 @@ export function createMirrorPublicationService({
       }
       if (client !== undefined) {
         requireClient(client);
-        await this.lockForWrite(client);
+        await this.lockForWrite(client,shopId);
         return repository.publishGeneration({
           client,
           shopId,

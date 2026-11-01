@@ -47,17 +47,14 @@ test("extractProductIds: extracts product GIDs from products, variants, collecti
   });
   assert.deepEqual(fromCollection, [productId, "gid://shopify/Product/789"]);
 
-  // 5. Database lookup for inventory item
+  // 5. Unverified inventory mappings must request a durable broader refresh.
   const mockDb = {
     async query(sql, params) {
-      if (sql.includes("FROM mirror.variants v") && params[1] === 888n) {
-        return { rows: [{ shopify_id: productId }] };
-      }
-      return { rows: [] };
+      assert.fail("An unavailable inventory relation must not be queried");
     },
   };
   const fromInventory = await extractProductIds("INVENTORY_LEVELS_UPDATE", { inventory_item_id: 888 }, mockDb, shopId);
-  assert.deepEqual(fromInventory, [productId]);
+  assert.deepEqual(fromInventory, []);
 });
 
 test("createWebhookHandlers: registers all expected topics and cleans sessions on uninstall/redact", async () => {
@@ -102,14 +99,14 @@ test("handleWebhookEvent: persists verified event identity and mutation journal 
 
   const mockClient = {
     async query(sql, params) {
-      if (sql.includes("SELECT payload_hash FROM mirror.webhook_receipts")) {
+      if (sql.includes("SELECT payload_hash,topic FROM mirror.webhook_receipts")) {
         const key = `${params[0]}:${params[1]}`;
         const rec = store.receipts.get(key);
         return { rows: rec ? [rec] : [] };
       }
       if (sql.includes("INSERT INTO mirror.webhook_receipts")) {
         const key = `${params[0]}:${params[1]}`;
-        store.receipts.set(key, { payload_hash: params[3] });
+        store.receipts.set(key, { payload_hash: params[3],topic:params[2] });
         return { rows: [{ id: 1n }] };
       }
       if (sql.includes("SELECT * FROM mirror.mutation_journal")) {
@@ -211,11 +208,11 @@ test("handleWebhookEvent: PRODUCTS_DELETE sets deleted=true and bumps revision",
 
   const mockClient = {
     async query(sql, params) {
-      if (sql.includes("SELECT payload_hash FROM mirror.webhook_receipts")) {
+      if (sql.includes("SELECT payload_hash,topic FROM mirror.webhook_receipts")) {
         return { rows: [] };
       }
       if (sql.includes("INSERT INTO mirror.webhook_receipts")) {
-        store.receipts.set(`${params[0]}:${params[1]}`, { payload_hash: params[3] });
+        store.receipts.set(`${params[0]}:${params[1]}`, { payload_hash: params[3],topic:params[2] });
         return { rows: [{ id: 1n }] };
       }
       if (sql.includes("SELECT * FROM mirror.mutation_journal")) {

@@ -30,8 +30,8 @@ export function createBulkOperationRunner({
   });
 
   return Object.freeze({
-    async cancelBulkCatalogExport({ shopId, runId }) {
-      return bulkSync.cancelBulkQuery({ shopId, runId });
+    async cancelBulkCatalogExport({ shopId, runId, reconcile = false }) {
+      return bulkSync.cancelBulkQuery({ shopId, runId, reconcile });
     },
     async initiateBulkCatalogExport({ shopId, syncRun }) {
       return bulkSync.startBulkQuery({ shopId, syncRun });

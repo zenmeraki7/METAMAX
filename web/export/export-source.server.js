@@ -8,6 +8,7 @@ import {assertVerifiedMirrorSqlSchema,assertPhysicalColumn} from "../services/mi
 import {withCoverageTransaction} from "../mirror/coverage-transaction.server.js";
 import {transaction} from "../mirror/transactions.server.js";
 import {isValidShopifySession} from "../middleware/session-validation.js";
+import {assertInstallationTenant} from '../security/installation-lifecycle.server.js';
 import {FIELD_SOURCES} from "../fields/sources.js";
 import {EXPORT_ERROR_CODES as C,ExportContractError,canonicalizeJson} from "./export-contract.js";
 const fail=(message,code=C.UNAUTHORIZED)=>{throw new ExportContractError(code,message);};
@@ -36,7 +37,7 @@ export function createExportCoverageRepository({database,repository}={}) {
         return snapshot&&{...snapshot,targetingSnapshot:{id:approval.snapshot_id,shopId:approval.shop_id,
           generationId:approval.generation_id,coverageRevision:approval.coverage_revision,status:approval.status,datasets:approval.datasets}};
       }
-      return input.client?read(input.client):transaction(database,read);
+      return input.client?read(input.client):transaction(database,read, input.shopId);
     },
   });
 }
@@ -59,12 +60,12 @@ export function createExportSource({database,runtime,publicationService,sessionS
   const selection=createSelectionService({database,catalogQueryService:runtime.catalogQuery,resolveShop:runtime.authentication.resolveShop});
   async function resolveShop(authContext) {
     const shopId=await runtime.authentication.resolveShop(authContext);
-    const installed=(await database.query("SELECT installation_version FROM mirror.shops WHERE id=$1 AND uninstalled_at IS NULL",[shopId])).rows[0];
-    if(!installed)fail("Active export installation required");
-    return {id:shopId,installationId:installed.installation_version};
+    const tenant=assertInstallationTenant(await runtime.authentication.resolveTenant(authContext));
+    if(tenant.shopId!==shopId)fail('Export installation authority differs');
+    return {id:shopId,installationId:tenant.installationId};
   }
   async function offline(job) {
-    const session=(await sessionStorage.findSessionsByShop(job.shop_id)).find(s=>s.isOnline===false&&s.shop===job.shop_id&&isValidShopifySession(s,{requireCredentials:true}));
+    const session=(await sessionStorage.findSessionsByShop(job.shop_id)).find(s=>s.isOnline===false&&s.shop===job.shop_id&&isValidShopifySession(s));
     if(!session)fail("Current offline export session required");
     const req={};runtime.authentication.capture(req,{locals:{shopify:{session}}},()=>{});
     const context=await runtime.authentication.authenticate(req);if(!context)fail("Export worker authentication unavailable");return context;
@@ -74,12 +75,12 @@ export function createExportSource({database,runtime,publicationService,sessionS
     authorizeJob:options=>api.readPage({...options,authorizationOnly:true}),
     async authorizeDownload({authContext,job}) {
       const current=await resolveShop(authContext);
-      if(current.id!==job.shop_id||current.installationId!==job.installation_id)fail("Export download installation differs");
+      if(current.id!==job.shopId||current.installationId!==job.installationId)fail("Export download installation differs");
       const client=await database.connect();
       try {
-        await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+        await client.query("BEGIN ISOLATION LEVEL READ COMMITTED READ ONLY");
         await client.query("SET LOCAL statement_timeout='10000ms'");await client.query("SET LOCAL lock_timeout='2000ms'");
-        await publicationService.lockForRead(client);
+        await publicationService.lockForRead(client,current.id);
         const published=(await client.query(`SELECT generation_id,coverage_revision FROM mirror.publications WHERE shop_id=$1`,[current.id])).rows[0];
         if(!published)fail("Current export download authorization unavailable",C.MISSING_COVERAGE);
         columns(job.manifest.fields.map(field=>field.id));
@@ -123,9 +124,9 @@ export function createExportSource({database,runtime,publicationService,sessionS
         approvedTargetingSnapshot:approved,expectedRegistryVersion:manifest.registryVersion,expectedDefinitionRevisions:manifest.definitionRevisions};
       const client=suppliedClient??await database.connect();
       try {
-        if(!suppliedClient)await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+        if(!suppliedClient)await client.query("BEGIN ISOLATION LEVEL READ COMMITTED READ ONLY");
         await client.query("SET LOCAL statement_timeout='10000ms'");await client.query("SET LOCAL lock_timeout='2000ms'");
-        await publicationService.lockForRead(client);
+        await publicationService.lockForRead(client,job.shop_id);
         const installed=await resolveShop(authContext);if(installed.id!==job.shop_id||installed.installationId!==job.installation_id)fail("Export installation changed");
         const target=(await client.query(`SELECT s.selection_hash,s.selected_count FROM mirror.selection_snapshots s
           JOIN export_engine.target_approvals a ON a.shop_id=s.shop_id AND a.snapshot_id=s.id

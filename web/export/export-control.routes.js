@@ -3,7 +3,8 @@ import {pipeline} from "node:stream/promises";
 import {ExportContractError,exportMimeType} from "./export-contract.js";
 import {FIELD_ERROR_CODES as F} from "../fields/types.js";
 
-export function createExportControlRouter({authentication,source,repository,storage,database}={}) {
+export function createExportControlRouter({authentication,source,repository,controlRepository,storage,database}={}) {
+  repository=controlRepository??repository;
   for(const [value,key] of [[authentication,"authenticate"],[source,"resolveShop"],[source,"authorizeDownload"],
     [repository,"getJob"],[repository,"requestCancellation"],[storage,"openRegisteredArtifact"],[database,"query"]])
     if(typeof value?.[key]!=="function")throw new TypeError(`Export control dependency ${key} required`);
@@ -22,7 +23,7 @@ export function createExportControlRouter({authentication,source,repository,stor
         return res.status(202).json({data:{id:job.id,state:cancelled?.state??job.state}});
       }
       if(action==="status")return res.json({data:{id:job.id,state:job.state,format:job.manifest.format,
-        rowsCommitted:job.rows_committed,bytesCommitted:job.bytes_committed,attempts:job.attempts,failureCode:job.failure_code,
+        rowsCommitted:job.rowsCommitted,bytesCommitted:job.bytesCommitted,attempts:job.attempts,failureCode:job.failureCode,
         downloadPath:job.state==="COMPLETED"?`/api/exports/${job.id}/download`:null}});
       if(job.state!=="COMPLETED")return res.status(409).json({error:"EXPORT_NOT_COMPLETED"});
       await source.authorizeDownload({authContext,job});

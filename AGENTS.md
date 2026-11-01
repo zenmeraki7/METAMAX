@@ -4,6 +4,14 @@ This app is scaffolded from a Shopify app template. See the README for framework
 
 Use the [Shopify AI Toolkit](https://shopify.dev/docs/apps/build/ai-toolkit) for all Shopify API and platform work. If missing, install it in the agent host per that page (or `npx skills add Shopify/shopify-ai-toolkit --list` for skill-compatible hosts) — do not add tooling to this repo.
 
+## Backend Interface Contracts
+
+Every new or changed backend interface must declare its input schema, output schema, authority requirements, lifecycle preconditions and durable side effects. Interfaces that participate in Shopify mutations must also declare retry and uncertain-outcome behavior, including what happens when a database commit response or remote response is lost.
+
+Keep the declaration beside its owning interface or link it to a method-specific record in [the backend contract standard](docs/backend-interface-contracts.md). Document where each requirement is enforced; metadata, forwarded coordinates and queue messages are not authority grants. Include transaction ownership, fencing, terminal-state meaning and sensitive outputs when relevant.
+
+Preserve module ownership and existing names unless a behavioral change requires otherwise. Contract consistency does not require centralizing helpers. When a contract changes, update its consumers and relevant adversarial tests together. Prioritize lifecycle semantics, finalization scope, authority and publication fencing over cosmetic consistency. Report unavailable database/concurrency checks explicitly; unit tests do not certify them.
+
 ## Ingestion & Reconciliation Invariants
 
 One necessary prerequisite remains: the importer must have finished its database writes before the run transitions to RECONCILING. `processedLines === expectedLines` is only a valid completeness check if those counts represent durable, validated ingestion—not merely lines read from JSONL.

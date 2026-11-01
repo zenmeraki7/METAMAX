@@ -1,37 +1,20 @@
 import express from "express";
 import {
   EXPORT_LIMITS,
-  EXPORT_ERROR_CODES,
   normalizeIdempotencyKey,
   ExportContractError,
 } from "../export/export-contract.js";
 
-function extractAuthenticatedShopKey(authContext) {
-  if (!authContext || typeof authContext !== "object") {
-    return null;
-  }
-
-  const candidate =
-    authContext.shopId ??
-    authContext.shop?.id ??
-    (typeof authContext.shop === "string"
-      ? authContext.shop
-      : null);
-
-  if (
-    typeof candidate !== "string" ||
-    candidate.trim() === ""
-  ) {
-    return null;
-  }
-
-  return candidate;
-}
-
+/** HTTP export admission: authenticate, bound/parse JSON and normalize the
+ * idempotency key; delegate durable creation/replay and return its receipt.
+ * The production Export Service owns current authorization, persistent replay
+ * lookup and the single new-admission limiter. A route limiter is forbidden
+ * because it could charge or reject a replay before durable lookup.
+ */
 export function createExportRouter({
   authenticate,
   exportService,
-  rateLimiter,
+  ...unsupported
 } = {}) {
   if (
     typeof authenticate !== "function" ||
@@ -42,13 +25,8 @@ export function createExportRouter({
     );
   }
 
-  if (
-    rateLimiter !== undefined &&
-    typeof rateLimiter?.consume !== "function"
-  ) {
-    throw new TypeError(
-      "rateLimiter.consume() must be a function when provided",
-    );
+  if (Object.hasOwn(unsupported, 'rateLimiter')) {
+    throw new TypeError('Configure export admission rateLimiter on the Export Service, not the HTTP router');
   }
 
   const router = express.Router();
@@ -77,31 +55,6 @@ export function createExportRouter({
               retryable: false,
             },
           });
-        }
-
-        // Rate limit strictly by server-authenticated shop identity,
-        // NEVER by an untrusted client header such as X-Shop-Domain.
-        if (rateLimiter) {
-          const shopKey = extractAuthenticatedShopKey(authContext);
-          if (!shopKey) {
-            throw new ExportContractError(
-              EXPORT_ERROR_CODES.UNAUTHORIZED,
-              "Authenticated shop identity required for rate limiting",
-            );
-          }
-
-          const allowed = await rateLimiter.consume({
-            shopId: shopKey,
-            operation: "export",
-          });
-
-          if (!allowed) {
-            throw new ExportContractError(
-              EXPORT_ERROR_CODES.RATE_LIMITED,
-              "Export rate limit exceeded",
-              { retryable: true },
-            );
-          }
         }
 
         const idempotencyKey = normalizeIdempotencyKey(

@@ -59,20 +59,21 @@ structurally valid record or an earlier authorization response. See the
 
 | Command | Result |
 | --- | --- |
-| `npm run test:history` | 53 passed; six empty future-phase placeholders excluded |
-| `npm run test:history:postgres` | 76 passed |
-| `npm run test:history:upgrade` | 77 passed |
+| `npm run test:history` | 61 passed across seven implemented test files |
+| `npm run test:history:postgres` | 92 passed |
+| `npm run test:history:upgrade` | 93 passed |
 | `npm run test:schema` | 144 full migration-chain PostgreSQL checks passed |
-| `npm test` | 1,027 passed; zero failures; one pre-existing unrelated TODO |
+| `npm test` | 1,034 passed; zero failures; one pre-existing unrelated TODO |
 
 Coverage includes rollback, duplicate admission/dispatch, genuine approval hash
 verification, exact approved targeting, rejection of foreign tenant/item
 snapshots, bigint preservation, scoped reads, receipt/content corruption,
 mid-transaction revocation/expiry, bounded retry and uncertain COMMIT handling.
 
-The pending uniqueness, envelope and security/retention migrations are tested on
+The pending uniqueness, envelope, security/retention and undo-execution migrations are tested on
 disposable PostgreSQL and not deployed live. Applied V1/V2 migrations are
-unchanged. Real durable V3 admission/observation/outcome providers, any trusted
-provenance backfill and the worker's actual dispatch-consumption boundary still
-require integration review before activation. Undo and merchant HTTP routes
-remain later integrations. Passing repository tests is not production approval.
+unchanged. The worker send boundary, undo preflight/approval/handoff and recovery
+are now composed and tested; see [execution fixes](bulk-execution-history-fixes.md).
+Production durable providers, provenance backfill, permissions and SDK retry
+configuration still require deployment review before activation. Passing tests
+does not itself approve live Shopify dispatch.

@@ -35,7 +35,7 @@ export default function HistoryStats({ operations }) {
     operations.filter((item) => item.status === status).length;
   const completed = count("Completed");
   const inProgress =
-    count("Running") + count("Queued") + count("Pending") + count("Retrying");
+    count("Running") + count("In Progress") + count("Queued") + count("Pending") + count("Retrying");
   const cancelled = count("Cancelled");
   const failed = count("Failed") + count("Expired");
   const percentage = (value) => (total ? Math.round((value / total) * 100) : 0);
@@ -49,10 +49,9 @@ export default function HistoryStats({ operations }) {
       <StatCard
         title="Total operations"
         value={total}
-        detail="12% from last 30 days"
+        detail="Loaded history records"
         tone="blue"
         icon={"clipboard"}
-        growth
       />
 
       <StatCard
@@ -73,6 +72,14 @@ export default function HistoryStats({ operations }) {
         }
         tone={inProgress > 0 ? "blue" : "gray"}
         icon={inProgress > 0 ? "refresh" : "x-circle"}
+      />
+
+      <StatCard
+        title="Partially completed"
+        value={count("Partial")}
+        detail={`${percentage(count("Partial"))}% of operations`}
+        tone="gray"
+        icon={"alert-triangle"}
       />
 
       <StatCard

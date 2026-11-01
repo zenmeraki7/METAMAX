@@ -12,27 +12,15 @@
 import { FieldError, FIELD_ERROR_CODES as C } from "../fields/types.js";
 
 export function createPerformanceProfiler({
-  database,
   logger = console,
 } = {}) {
   return Object.freeze({
     /**
      * Inspects the EXPLAIN execution plan for a compiled filter query.
      */
-    async analyzeQueryPlan({
-      client,
-      sql,
-      params = [],
-    } = {}) {
-      const q = client || database;
-      if (!q || typeof q.query !== "function") {
-        throw new TypeError("Database client with query method required");
-      }
-
-      // Run EXPLAIN (FORMAT JSON)
-      const explainSql = `EXPLAIN (FORMAT JSON) ${sql}`;
-      const res = await q.query(explainSql, params);
-      const planRoot = res.rows?.[0]?.["QUERY PLAN"]?.[0]?.Plan;
+    async analyzeQueryPlan({plan,...unsupported}={}) {
+      if(Object.keys(unsupported).length)throw new TypeError('Profiler accepts an existing plan only; SQL execution belongs to protected infrastructure');
+      const planRoot=plan;
 
       if (!planRoot) {
         return {

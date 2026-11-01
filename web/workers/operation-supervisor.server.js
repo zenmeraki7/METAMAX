@@ -1,11 +1,12 @@
 /**
  * METAMAX — Operation Worker Supervisor
  *
- * Runs scheduled checks for due bulk edit and undo jobs in mirror.job_commands,
+ * Runs scheduled checks for due bulk edit, row import and undo commands,
  * coordinating with operation.worker.js and history execution.
  */
 
 import { randomUUID } from "node:crypto";
+import {assertOperationWorker} from './operation.worker.js';
 
 export function createOperationSupervisor({
   database,
@@ -13,50 +14,39 @@ export function createOperationSupervisor({
   intervalMs = 3000,
   logger = console,
 } = {}) {
+  if(worker!==null)assertOperationWorker(worker);
+  if(!Number.isSafeInteger(intervalMs)||intervalMs<100||intervalMs>60000)throw TypeError('Bounded operation poll interval required');
   let timer = null;
   let running = false;
   let stopped = true;
+  let inFlight;
   const workerId = `op-supervisor-${randomUUID().slice(0, 8)}`;
 
   async function tick() {
-    if (stopped || running || !database) return;
+    if (stopped || running || !database || !worker) return;
     running = true;
     try {
-      // Advisory probe: check if any job is due before acquiring worker lease
-      const due = await database.query(`
-        SELECT 1 FROM mirror.job_commands
-        WHERE kind IN ('bulk_edit', 'undo')
-          AND attempts < max_attempts
-          AND cancel_requested_at IS NULL
-          AND NOT COALESCE((checkpoint->>'review_required')::boolean, false)
-          AND (
-            (status IN ('PENDING', 'RETRY') AND (available_at IS NULL OR available_at <= clock_timestamp()))
-            OR (status = 'RUNNING' AND lease_until <= clock_timestamp())
-          )
-        LIMIT 1
-      `);
-
-      if (due.rowCount > 0 && worker?.claimNext && worker?.process) {
-        const claim = await worker.claimNext({ workerId, leaseSeconds: 120 });
-        if (claim) {
-          logger.info?.(`[operation-supervisor] Processing job ${claim.id} (kind: ${claim.kind})`);
-          await worker.process({ claim, workerId });
-        }
+      // Each independent maintenance phase gets a chance even if another fails.
+      for(const maintenance of ['discoverRecoveries','reconcileFinalizations']){
+        try{await worker[maintenance]?.({workerId});}
+        catch(error){try{logger.error?.({code:'OPERATION_MAINTENANCE_FAILED',phase:maintenance},'Independent operation reconciliation failed');}catch{}}
       }
+      await worker.processOne({workerId,leaseSeconds:120});
     } catch (error) {
-      logger.error?.({ error: error.message || error }, "[operation-supervisor] Tick failed");
+      try{logger.error?.('[operation-supervisor] Tick failed; durable recovery remains available');}catch{}
     } finally {
       running = false;
     }
   }
+  const run=()=>{if(!running&&!stopped)inFlight=tick();};
 
   return Object.freeze({
     start() {
-      if (!stopped) return;
+      if (!stopped || !worker || !database) return;
       stopped = false;
-      timer = setInterval(tick, intervalMs);
+      timer = setInterval(run, intervalMs);
       timer.unref?.();
-      void tick();
+      run();
     },
     async stop() {
       stopped = true;
@@ -64,6 +54,7 @@ export function createOperationSupervisor({
         clearInterval(timer);
         timer = null;
       }
+      await inFlight;
     },
   });
 }

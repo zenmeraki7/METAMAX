@@ -1,3 +1,4 @@
+import {CATALOG_PHASE_GENERATION_SQL} from './catalog-phase-generations.server.js';
 /** PostgreSQL delivery reservations, not execution leases. All callbacks are
  * DB-only; a Redis error must never fail the actual catalog execution. */
 import {randomUUID} from 'node:crypto';
@@ -63,10 +64,7 @@ const authority=`j.execution_mode='PHASE' AND NOT j.cancel_requested AND j.statu
   AND NOT e.cancel_requested AND NOT e.review_required AND e.completed_at IS NULL
   AND g.mirror_schema_version=$1 AND g.source_contract_version=$2 AND g.mapping_version='mapping_v1'
   AND (r.status='SUCCEEDED' OR r.execution_fence=e.fence)
-  AND ((e.phase IN ('STARTING','WAITING') AND g.status='INGESTING')
-    OR (e.phase='INGESTING' AND g.status IN ('INGESTING','RECONCILING'))
-    OR (e.phase='RECONCILING' AND g.status IN ('RECONCILING','VERIFIED'))
-    OR (e.phase='PUBLISHING' AND g.status IN ('VERIFIED','PUBLISHED')))`;
+  AND ${CATALOG_PHASE_GENERATION_SQL}`;
 const recoveryDue=`d.next_attempt_at<=clock_timestamp() AND (d.recovery_token IS NULL OR d.recovery_until<=clock_timestamp()) AND (
   d.state IN ('UNKNOWN','ENQUEUED')
   OR (d.state='RESERVED' AND d.reserved_until<=clock_timestamp())

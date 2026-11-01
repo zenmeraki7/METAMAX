@@ -1,7 +1,11 @@
-import test from "node:test";
+import {approvedContractFixture} from '../security/test-support/approved-contract.js';
+import {createInstallationResolver} from '../security/installation-lifecycle.server.js';
+import test,{mock} from "node:test";
 import assert from "node:assert/strict";
-import { createJobDispatchService } from "../services/job-dispatch.server.js";
-import { createOperationWorker } from "./operation.worker.js";
+const actualRuntime=await import('../security/runtime-database.server.js');
+mock.module('../security/runtime-database.server.js',{namedExports:{...actualRuntime,assertRuntimeDatabaseProfile(){}}});
+const {createJobDispatchService}=await import("../services/job-dispatch.server.js");
+const {createOperationWorker}=await import("./operation.worker.js");
 
 test("job dispatch: creates durable job command, outbox event, and edit items with idempotency", async () => {
   const shopId = "dispatch-test.myshopify.com";
@@ -12,6 +16,7 @@ test("job dispatch: creates durable job command, outbox event, and edit items wi
 
   const mockDb = {
     async query(sql, params) {
+      if(sql.includes('FROM mirror.shops'))return {rows:[{installation_version:'install-1'}]};
       if (sql.includes("FROM mirror.job_commands c")) {
         // First check: does not exist
         return { rows: [] };
@@ -24,7 +29,7 @@ test("job dispatch: creates durable job command, outbox event, and edit items wi
             snapshot_id: "snap-123",
             status: "APPROVED",
             operation: "bulk_edit",
-            contract: { updates: { status: "ACTIVE" } },
+            contract: { writeCapabilityVersion:'product-set-v1',updates: { status: "ACTIVE" } },
           }],
         };
       }
@@ -61,10 +66,10 @@ test("job dispatch: creates durable job command, outbox event, and edit items wi
 
   mockDb.connect = async () => ({ query:mockDb.query,release() {} });
   const authContext = Object.freeze({});
-  const dispatch = createJobDispatchService({ database: mockDb,
+  const dispatch = createJobDispatchService({ database: mockDb,resolveTenant:async()=>createInstallationResolver({readInstallation:async()=>({installation_version:'install-1'})})(shopId),
     resolveShop: async context => { assert.equal(context,authContext); return shopId; },
     authorizeWrite: async () => true,
-    approvalService: { async getApprovedContract() { return (await mockDb.query("FROM mirror.execution_contracts")).rows[0]; } },
+    approvalService: { async getApprovedContract() { return approvedContractFixture((await mockDb.query("FROM mirror.execution_contracts")).rows[0]); } },
   });
 
   const result = await dispatch.dispatchBulkEdit({

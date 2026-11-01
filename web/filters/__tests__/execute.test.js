@@ -96,7 +96,7 @@ describe("transactional filter executor", async () => {
     const result = await f.run();
     assert.deepEqual(f.events, [
       { auth: "verified-session" }, "connect",
-      { sql: "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY", values: undefined },
+      { sql: "BEGIN ISOLATION LEVEL READ COMMITTED READ ONLY", values: undefined },
       { sql: "SET LOCAL statement_timeout = '5000ms'", values: undefined },
       { sql: "SET LOCAL lock_timeout = '1000ms'", values: undefined },
       { publication: { client: f.client, shopId: "alpha.myshopify.com", generationId: "g1", coverageRevision: "r1", datasets: ["products", "variants"] } },

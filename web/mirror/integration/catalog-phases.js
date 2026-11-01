@@ -1,3 +1,7 @@
+import {createPublicationRepository} from '../publication-repository.server.js';
+import pg from 'pg';
+import {randomBytes} from 'node:crypto';
+import {createVerifiedRuntimePool} from '../../security/runtime-database.server.js';
 import assert from 'node:assert/strict';
 import { Readable } from 'node:stream';
 import { createCatalogPhaseRuntime } from '../../services/catalog-phase-runtime.server.js';
@@ -12,8 +16,16 @@ import { createSyncExternalOperations } from '../sync-external-operations.server
 import { CATALOG_INPUT_HASH } from '../catalog-sync-steps.server.js';
 import { testSyncDispatchRepository } from './sync-dispatch-repository.js';
 import { testInstallSync } from './install-sync.js';
+import { testWebhookRefresh } from './webhook-refresh.js';
 
 export async function testCatalogPhases(t,pool) {
+  const password=randomBytes(24).toString('hex');
+  await pool.query(`CREATE ROLE phase_engine_runtime LOGIN PASSWORD '${password}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`);
+  await pool.query('GRANT metamax_engine_runtime TO phase_engine_runtime');
+  const url=new URL(process.env.FILTER_TEST_DATABASE_URL);url.username='phase_engine_runtime';url.password=password;
+  const enginePool=new pg.Pool({connectionString:url.href,max:10});
+  try {
+
   const states=new Map(),sessions=new Map();let sequence=9000;
   function fixture(name,products=[product(31)]) {
     const shop=`${name}.myshopify.com`,session={id:`offline_${shop}`,shop,isOnline:false,scope:'read_products',accessToken:'fixture'};
@@ -27,12 +39,18 @@ export async function testCatalogPhases(t,pool) {
     if(s.denyAuthorization)throw new Error('Credential revoked');
   },request:async(query,{variables}={})=>{
     const s=states.get(shopId);
+    if(query.includes('MirrorProductSnapshot')) {
+      const records=s.lines.map(line=>JSON.parse(line));
+      const p=records.find(p=>p.id===variables.id&&!p.__parentId);
+      return {data:{product:p?{...p,variants:{nodes:records.filter(v=>v.__parentId===p.id).map(({__parentId,...v})=>v),pageInfo:{hasNextPage:false,endCursor:null}}}:null}};
+    }
     if(query.includes('StartBulkOperation')) {s.starts++;if(s.loseStart)throw new Error('Response lost after dispatch');
       return {data:{bulkOperationRunQuery:{bulkOperation:{id:s.operationId,status:'CREATED'},userErrors:[]}}};}
     if(query.includes('CancelMirrorBulk')){
       s.cancels=(s.cancels??0)+1;
       if(s.onCancel)await s.onCancel();
       if(s.failCancel)throw new Error('Remote cancel failed');
+      if(Object.hasOwn(s,'cancelResponse'))return s.cancelResponse;
       return {data:{bulkOperationCancel:{bulkOperation:{id:s.operationId,status:'CANCELLED'},userErrors:[]}}};
     }
     if(s.failStatus)throw new Error('Status verification unavailable');
@@ -40,8 +58,12 @@ export async function testCatalogPhases(t,pool) {
     assert.equal(variables.id,s.operationId);s.polls++;
     return {data:{bulkOperation:{id:s.operationId,status:s.remoteStatus??(s.pending?'RUNNING':'COMPLETED'),objectCount:String(s.lines.length),url:`https://storage.googleapis.com/${shopId}`}}};
   }});
-  const fetchImpl=async url=>({ok:true,body:Readable.from(states.get(new URL(url).pathname.slice(1)).lines.map(l=>Buffer.from(l+'\n')),{objectMode:false})});
-  const options={database:pool,shopify,clientFactory,fetchImpl,logger:{info(){},error(){}}};
+  const fetchImpl=async(url,{headers}={})=>{
+    const bytes=Buffer.from(states.get(new URL(url).pathname.slice(1)).lines.map(line=>line+'\n').join(''));
+    const start=Number(/^bytes=(\d+)-/.exec(headers.Range)[1]),end=Math.min(bytes.length-1,start+1048575);
+    return {ok:true,status:206,headers:new Headers({etag:'"fixture-export"','content-range':`bytes ${start}-${end}/${bytes.length}`}),body:Readable.from([bytes.subarray(start,end+1)],{objectMode:false})};
+  };
+  const options={database:createVerifiedRuntimePool(enginePool),shopify,clientFactory,fetchImpl,logger:{info(){},error(){}}};
   const runtime=await createCatalogPhaseRuntime(options);
   await t.test('physical schema revalidation batches all domain metadata into three network reads',async()=>{
     let metadataQueries=0;
@@ -71,6 +93,40 @@ export async function testCatalogPhases(t,pool) {
     return {s,job,repo,claim,ledger};
   }
   await testInstallSync(t,{pool,fixture,service,runtime,state,makeDue,shopify,sessions,options});
+  await t.test('missing, mismatched and CANCELING cleanup results remain pending until exact terminal observation',async()=>{
+    for(const mode of ['missing','mismatch','canceling']){
+      const s=fixture('cleanup-contract-'+mode),job=await service.enqueue(s.session);
+      await runtime.processOne();
+      s.cancelResponse={data:{bulkOperationCancel:mode==='missing'?null:{userErrors:[],bulkOperation:{id:mode==='mismatch'?'gid://shopify/BulkOperation/999999':s.operationId,status:'CANCELING'}}}};
+      await service.cancel(s.session,job.id);
+      const pending=await runtime.processOne();assert.equal(pending.kind,'CANCEL_PENDING');
+      let row=await state(job.id);assert.equal(row.cancel_completed_at,null);assert.equal(row.outcome_uncertain,mode!=='canceling');
+      s.remoteStatus='CANCELING';await makeDue(job.id);assert.equal((await runtime.processOne()).kind,'CANCEL_PENDING');
+      row=await state(job.id);assert.equal(row.cancel_completed_at,null);
+      s.remoteStatus='CANCELLED';await makeDue(job.id);assert.equal((await runtime.processOne()).kind,'CANCELLED');
+      row=await state(job.id);assert.ok(row.cancel_completed_at);assert.equal(row.outcome_uncertain,false);
+    }
+  });
+  await t.test('expired old generations archive and release terminal execution references while current publication survives',async()=>{
+    const s=fixture('catalog-retention'),first=await service.enqueue(s.session);assert.ok((await drain(first.id)).completed_at);
+    const second=await service.enqueue(s.session);assert.ok((await drain(second.id)).completed_at);
+    const c=await pool.connect();try{
+      await c.query('BEGIN');await c.query('LOCK TABLE mirror.generations IN ACCESS EXCLUSIVE MODE');
+      // Isolated fixture clock simulation only; guards are restored before reclamation and FKs remain enabled.
+      await c.query('ALTER TABLE mirror.generations DISABLE TRIGGER guard_sync_retention');
+      await c.query("UPDATE mirror.generations SET retain_until=clock_timestamp()-interval '1 day' WHERE shop_id=$1 AND id=$2",[s.session.shop,first.generationId]);
+      await c.query('ALTER TABLE mirror.generations ENABLE TRIGGER guard_sync_retention');
+      await c.query("UPDATE mirror.catalog_import_executions SET completed_at=clock_timestamp()-interval '2 days' WHERE id=$1",[first.id]);
+      await c.query("UPDATE mirror.catalog_import_jobs SET updated_at=clock_timestamp()-interval '2 days' WHERE id=$1",[first.id]);
+      await c.query('COMMIT');
+    }catch(error){await c.query('ROLLBACK');throw error;}finally{c.release();}
+    const repository=createPublicationRepository({database:pool});assert.equal(await repository.reclaimGeneration({shopId:s.session.shop,generationId:first.generationId}),true);
+    assert.equal((await pool.query('SELECT 1 FROM mirror.generations WHERE shop_id=$1 AND id=$2',[s.session.shop,first.generationId])).rowCount,0);
+    assert.equal((await pool.query('SELECT 1 FROM mirror.catalog_import_executions WHERE id=$1',[first.id])).rowCount,0);
+    assert.equal((await pool.query('SELECT generation_id FROM mirror.publications WHERE shop_id=$1',[s.session.shop])).rows[0].generation_id,second.generationId);
+    assert.equal((await pool.query('SELECT 1 FROM mirror.catalog_retention_audit WHERE shop_id=$1 AND generation_id=$2',[s.session.shop,first.generationId])).rowCount,1);
+  });
+  await testWebhookRefresh(t,{pool,fixture,service,runtime,drain,options});
   await testSyncDispatchRepository(t,{pool,fixture,service,runtime,state,makeDue});
   await t.test('ledger commits preparation separately and allows exactly one dispatch',async()=>{
     const {claim,ledger}=await ledgerFixture('ledger-dispatch');
@@ -324,4 +380,5 @@ export async function testCatalogPhases(t,pool) {
     assert.ok((await drain(job.id)).completed_at);assert.equal(s.starts,1);
   });
   await testSyncRecoveryRepository(t,{pool,fixture,service,runtime,state,makeDue,drain});
+  }finally{await enginePool.end();await pool.query('DROP OWNED BY phase_engine_runtime');await pool.query('DROP ROLE phase_engine_runtime');}
 }

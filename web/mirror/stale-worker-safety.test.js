@@ -76,8 +76,11 @@ function createMockDbStore() {
     journal: new Map(),
   };
 
+  let transactionBackup;
   const client = {
     async query(sql, params = []) {
+      if(sql.startsWith("BEGIN"))transactionBackup=structuredClone(store);
+      if(sql === "ROLLBACK")Object.assign(store,transactionBackup);
       // 1. Generation queries
       if (sql.includes("JOIN mirror.catalog_changes") && sql.includes("FROM mirror.generations")) {
         for (const gen of store.generations.values()) {

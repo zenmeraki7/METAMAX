@@ -21,6 +21,7 @@ enum CoverageStatus {
 }
 
 model MirrorGeneration {
+  catalogDownloads CatalogDownload[]
   exportJobs ExportJob[]
   exportManifestJobs ExportManifestJob[]
   // Opaque text generation token matches coverage/cursor contracts.
@@ -62,6 +63,7 @@ model MirrorGeneration {
 // One current publication per shop. This relation is also the coarse lock barrier.
 // Every publisher, mutator and reclaimer MUST take lockForWrite in its transaction.
 model MirrorPublication {
+  historyLock      Int              @default(0) @map("_history_lock")
   shopId           String           @id @map("shop_id") @db.Text
   generationId     String           @map("generation_id") @db.Text
   coverageRevision String           @map("coverage_revision") @db.Text

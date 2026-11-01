@@ -136,11 +136,11 @@ describe("private parameterized PostgreSQL predicate compiler", {
       execute: overrides => executor.execute({ query, authContext: f.context.authContext, ...overrides }) };
   }
 
-  test("executor holds a read-only repeatable-read transaction through publication verification and returns a signed cursor", async () => {
+  test("executor holds a read-only shop-locked transaction through publication verification and returns a signed cursor", async () => {
     const f = await executionFixture();
     const result = await f.execute();
     assert.deepEqual(f.events, ["connect",
-      { command: "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY", values: undefined },
+      { command: "BEGIN ISOLATION LEVEL READ COMMITTED READ ONLY", values: undefined },
       { command: "SET LOCAL statement_timeout = '5000ms'", values: undefined },
       { command: "SET LOCAL lock_timeout = '1000ms'", values: undefined },
       "publication", { command: { text: f.query.text, values: f.query.values, rowMode: "array" }, values: undefined },
@@ -369,11 +369,12 @@ describe("private parameterized PostgreSQL predicate compiler", {
       const client = await catalog.pool.connect();
       return { release: () => client.release(), async query(command, values) {
         commands.push(command);
+        if(typeof command==='string'&&command.includes('SELECT installation_version,uninstalled_at FROM mirror.shops'))return {rows:[{installation_version:'install-1'}]};
         if (typeof command === "object") return { fields: [{ name: "product_id" }], rows: [["123"]] };
         return client.query(command, values);
       } };
     } };
-    const session = { id: "runtime-session", shop: SHOP, accessToken: "server-token" };
+    const session = { id: "runtime-session", shop: SHOP,isOnline:false, accessToken: "server-token", scope: "read_products,write_products" };
     const runtime = await createFilterHttpRuntime({ database,
       sessionStorage: { async loadSession(id) { assert.equal(id, session.id); return session; } },
       fieldServiceFactory: ({ resolveShop, verifyCoverage }) => R.createFieldService({ resolveShop, verifyCoverage,
@@ -396,11 +397,11 @@ describe("private parameterized PostgreSQL predicate compiler", {
         { fieldId: "variant.price", entity: "variant", column: "price", type: "numeric" },
       ],
       mirrorSchemaVersion: "mirror_v1", sourceContractVersion: "sources_v1", cursorSecret: Buffer.alloc(32, 7),
-      logger: { error() { assert.fail("Valid runtime request failed"); } },
+      logger: { error(details) { assert.fail(`Valid runtime request failed: ${details?.cause?.stack??details?.code}`); } },
     });
     const req = { body: { filter: { version: 1, root: node("variant.price", "gt", "100") } } };
     const res = { locals: { shopify: { session } }, setHeader() {}, status(value) { this.code = value; return this; }, json(value) { this.body = value; } };
-    runtime.capture(req, res, () => {});
+    await runtime.capture(req, res, () => {});
     await runtime.search(req, res, error => { throw error; });
     assert.equal(res.code, 200);
     assert.deepEqual(res.body.data.productIds, ["123"]);
@@ -411,7 +412,9 @@ describe("private parameterized PostgreSQL predicate compiler", {
     assert.deepEqual(executionCoverage[1].datasets, ["products", "variants"]);
     const barrierIndex = commands.indexOf('LOCK TABLE "mirror"."publications" IN ACCESS SHARE MODE');
     assert.ok(barrierIndex >= 0);
-    assert.equal(typeof commands[barrierIndex + 1], "object");
+    assert.match(commands[barrierIndex + 1], /set_config/);
+    assert.match(commands[barrierIndex + 2], /pg_advisory_xact_lock_shared/);
+    assert.ok(commands.findIndex((command,index)=>index>barrierIndex+1&&typeof command==="object")>barrierIndex+1);
   });
 
   test("physical column existence, type and table ownership gate complete query compilation", async () => {

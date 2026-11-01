@@ -69,52 +69,14 @@ test("database performance: tenant isolation and publication consistency verific
   assert.equal(mixedCheck.mixedGenerations, 1);
 });
 
-test("database performance: query plan analyzer verifies index usage", async () => {
-  const mockDb = {
-    async query(sql) {
-      if (sql.startsWith("EXPLAIN (FORMAT JSON)")) {
-        return {
-          rows: [
-            {
-              "QUERY PLAN": [
-                {
-                  Plan: {
-                    "Node Type": "Index Scan",
-                    "Scan Direction": "Forward",
-                    "Index Name": "products_shop_id_generation_id_id_key",
-                    "Startup Cost": 0.42,
-                    "Total Cost": 8.45,
-                    "Plan Rows": 25,
-                    Plans: [
-                      {
-                        "Node Type": "Index Only Scan",
-                        "Index Name": "variants_shop_id_generation_id_product_id_id_idx",
-                        "Total Cost": 4.1,
-                      },
-                    ],
-                  },
-                },
-              ],
-            },
-          ],
-        };
-      }
-      return { rows: [] };
-    },
-  };
-
-  const profiler = createPerformanceProfiler({ database: mockDb });
-
-  const planResult = await profiler.analyzeQueryPlan({
-    sql: "SELECT p.id FROM mirror.products p WHERE p.shop_id = $1 AND p.generation_id = $2 AND p.id > $3 LIMIT $4",
-    params: ["shop.myshopify.com", "gen-1", 100, 25],
-  });
-
-  assert.equal(planResult.usesIndex, true);
-  assert.equal(planResult.nodeType, "Index Scan");
-  assert.ok(planResult.indexNames.includes("products_shop_id_generation_id_id_key"));
-  assert.ok(planResult.indexNames.includes("variants_shop_id_generation_id_product_id_id_idx"));
-  assert.ok(planResult.totalCost < 50);
+test("database performance: query plan analyzer inspects plans without a raw SQL path", async () => {
+  const profiler=createPerformanceProfiler();
+  await assert.rejects(profiler.analyzeQueryPlan({sql:'SELECT * FROM mirror.products',params:[]}),TypeError);
+  const planResult=await profiler.analyzeQueryPlan({plan:{'Node Type':'Index Scan','Index Name':'products_shop_id_generation_id_id_key',
+    'Startup Cost':0.42,'Total Cost':8.45,'Plan Rows':25,Plans:[{'Node Type':'Index Only Scan','Index Name':'variants_shop_id_generation_id_product_id_id_idx','Total Cost':4.1}]}});
+  assert.equal(planResult.usesIndex,true);assert.equal(planResult.nodeType,'Index Scan');
+  assert.ok(planResult.indexNames.includes('products_shop_id_generation_id_id_key'));
+  assert.ok(planResult.indexNames.includes('variants_shop_id_generation_id_product_id_id_idx'));assert.ok(planResult.totalCost<50);
 });
 
 test("database performance: partial index efficiency eliminates write amplification on clean rows", () => {

@@ -17,11 +17,14 @@ function fixture() {
 test("publication checks acquire a read-only-compatible barrier before reading on the same client", async () => {
   const f = fixture();
   assert.equal((await f.service.requirePublished(f.input)).ready, true);
-  assert.deepEqual(f.events, ['LOCK TABLE "mirror"."publications" IN ACCESS SHARE MODE', {
+  assert.match(f.events[1],/set_config\('app.shop_id'/);
+  assert.equal(f.events[0],'LOCK TABLE "mirror"."publications" IN ACCESS SHARE MODE');
+  assert.match(f.events[2],/pg_advisory_xact_lock_shared/);
+  assert.deepEqual(f.events[3], {
     client: f.client, shopId: "shop.myshopify.com", generationId: "g1", datasets: ["products"],
-  }]);
-  await f.service.lockForWrite(f.client);
-  assert.equal(f.events.at(-1), 'LOCK TABLE "mirror"."publications" IN ACCESS EXCLUSIVE MODE');
+  });
+  await f.service.lockForWrite(f.client,"shop.myshopify.com");
+  assert.match(f.events.at(-1), /pg_advisory_xact_lock\(/);
 });
 
 test("publication checks reject cross-tenant, retired, changed and incomplete snapshots", async () => {

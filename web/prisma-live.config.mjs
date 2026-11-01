@@ -1,10 +1,11 @@
+import {loadMigrationEnvironment} from './security/migration-environment.server.js';
 // Read-only introspection of the database configured for this application.
 // This config has no migrations path and never replaces the application schema.
 import { existsSync, readFileSync } from "node:fs";
 import dotenv from "dotenv";
 
 const envFile = new URL("./.env", import.meta.url);
-const local = existsSync(envFile) ? dotenv.parse(readFileSync(envFile)) : {};
+const local = loadMigrationEnvironment();
 const configured = process.env.DIRECT_DATABASE_URL || local.DIRECT_DATABASE_URL ||
   process.env.DATABASE_URL || local.DATABASE_URL;
 if (!configured) throw new Error("An existing database connection is required for introspection");

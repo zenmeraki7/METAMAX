@@ -3,19 +3,26 @@ import assert from "node:assert/strict";
 import express from "express";
 import {Readable} from "node:stream";
 import {randomUUID} from "node:crypto";
+import {createExportRepository} from './export-repository.server.js';
+import {createExportControlAdapter} from './export-control-adapter.server.js';
 import {createExportControlRouter} from "./export-control.routes.js";
 import {ExportContractError,EXPORT_ERROR_CODES as C} from "./export-contract.js";
 async function fixture(callback) {
   const id=randomUUID(),identity={shopId:"controls.myshopify.com",installationId:"install"};
   const auth={},calls=[];let deny=false,authenticated=true,expired=false;
-  const job={id,shop_id:identity.shopId,installation_id:identity.installationId,state:"COMPLETED",lease_token:"never-return-this",
-    rows_committed:"2",bytes_committed:"4",manifest:{format:"JSONL",fileName:"products.jsonl"}};
+  const job={id,shopId:identity.shopId,installationId:identity.installationId,state:"COMPLETED",lease_token:"never-return-this",
+    rowsCommitted:"2",bytesCommitted:"4",manifest:{format:"JSONL",fileName:"products.jsonl"}};
   const options={
     authentication:{async authenticate(){return authenticated?auth:null;}},
     source:{async resolveShop(context){assert.equal(context,auth);return {id:identity.shopId,installationId:identity.installationId};},
       async authorizeDownload(){calls.push("authorize");if(deny)throw new ExportContractError(C.UNAUTHORIZED,"Denied");}},
-    repository:{async getJob(common){assert.deepEqual(common.identity,identity);return common.jobId===id?job:null;},
-      async requestCancellation(){calls.push("cancel");return {...job,state:"CANCELLING"};}},
+    controlRepository:createExportControlAdapter(createExportRepository({pool:{connect(){throw Error('Control does not need a new transaction');},async query(sql,p){
+      assert.deepEqual(p.slice(1),[identity.shopId,identity.installationId]);
+      if(p[0]!==id)return{rows:[]};
+      const raw={...job,shop_id:job.shopId,installation_id:job.installationId,rows_committed:job.rowsCommitted,bytes_committed:job.bytesCommitted,attempts:1};
+      if(sql.includes('UPDATE export_engine.jobs')){calls.push('cancel');return{rows:[{...raw,state:'CANCELLING'}]};}
+      return{rows:[raw]};
+    }},generationProtection:{verify(){},renew(){},release(){}},verifyStoredPart(){},verifyFinalArtifact(){},verifyDeliveryEvidence(){},reconcileDelivery(){},verifyRecoveryEvidence(){}})),
     storage:{async openRegisteredArtifact({artifact}){calls.push("open");assert.equal(artifact.storage_version,"v1");return Readable.from([Buffer.from("{}\n")]);}},
     database:{async query(sql,params){assert.deepEqual(params,[id,identity.shopId,identity.installationId]);assert.match(sql,/expires_at>clock_timestamp/);
       return {rows:expired?[]:[{format:"JSONL",byte_count:"3",storage_version:"v1"}]};}},
@@ -28,6 +35,7 @@ async function fixture(callback) {
 test("export status redacts worker authority and object storage metadata",async()=>fixture(async f=>{
   const response=await fetch(`${f.url}/${f.id}`),body=await response.json();
   assert.equal(response.status,200);assert.equal(body.data.id,f.id);
+  assert.equal(body.data.rowsCommitted,'2');assert.equal(body.data.bytesCommitted,'4');
   assert.equal("lease_token" in body.data,false);assert.equal("manifest" in body.data,false);
   assert.equal(response.headers.get("cache-control"),"private, no-store");
 }));

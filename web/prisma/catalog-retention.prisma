@@ -1,0 +1,11 @@
+model CatalogRetentionAudit {
+  shopId String @map("shop_id") @db.Text
+  generationId String @map("generation_id") @db.Text
+  summary Json @db.JsonB
+  reclaimedAt DateTime @default(dbgenerated("clock_timestamp()")) @map("reclaimed_at") @db.Timestamptz(3)
+  shop Shop @relation(fields:[shopId],references:[id],onDelete:Cascade)
+  @@id([shopId,generationId])
+  @@index([reclaimedAt],map:"catalog_retention_audit_age")
+  @@map("catalog_retention_audit")
+  @@schema("mirror")
+}

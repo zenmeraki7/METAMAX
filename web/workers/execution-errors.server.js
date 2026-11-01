@@ -1,0 +1,1 @@
+export const isStaleExecutionError=error=>['HISTORY_OWNERSHIP_LOST','STALE_CLAIM','WORKER_CLAIM_REVOKED','STALE_RECOVERY_CLAIM','INSTALLATION_NOT_ACTIVE'].includes(error?.code);

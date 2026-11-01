@@ -16,7 +16,7 @@ CREATE TABLE mirror.schedule_occurrences (
   scheduled_for timestamptz(3) NOT NULL,
   template jsonb NOT NULL,
   operation text NOT NULL,
-  status text NOT NULL DEFAULT 'QUEUED' CHECK(status IN('QUEUED','RUNNING','RETRY','SUCCEEDED','FAILED','CANCELLED')),
+  status text NOT NULL DEFAULT 'QUEUED' CHECK(status IN('QUEUED','RUNNING','RETRY','DISPATCHED','EXECUTING','SUCCEEDED','PARTIAL','FAILED','CANCELLED','REVIEW_REQUIRED')),
   phase text NOT NULL DEFAULT 'SELECT' CHECK(phase IN('SELECT','APPROVE','DISPATCH','DONE')),
   snapshot_id text,
   contract_id text,
@@ -48,7 +48,7 @@ BEGIN
     OR (OLD.snapshot_id IS NOT NULL AND NEW.snapshot_id IS DISTINCT FROM OLD.snapshot_id)
     OR (OLD.contract_id IS NOT NULL AND NEW.contract_id IS DISTINCT FROM OLD.contract_id)
     OR (OLD.command_id IS NOT NULL AND NEW.command_id IS DISTINCT FROM OLD.command_id)
-    OR (OLD.status IN('SUCCEEDED','CANCELLED') AND NEW IS DISTINCT FROM OLD) THEN
+    OR (OLD.status IN('SUCCEEDED','PARTIAL','FAILED','CANCELLED','REVIEW_REQUIRED') AND NEW IS DISTINCT FROM OLD) THEN
       RAISE EXCEPTION 'Schedule occurrence identity and checkpoints are immutable' USING ERRCODE='23514';
   END IF;
   RETURN NEW;

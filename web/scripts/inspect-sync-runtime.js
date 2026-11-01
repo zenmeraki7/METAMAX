@@ -1,6 +1,7 @@
+import {loadMigrationEnvironment} from '../security/migration-environment.server.js';
 import 'dotenv/config';
 import pg from 'pg';
-const pool=new pg.Pool({connectionString:process.env.DIRECT_DATABASE_URL||process.env.DATABASE_URL,max:1,connectionTimeoutMillis:15000,query_timeout:15000});
+const pool=new pg.Pool({connectionString:process.env.DIRECT_DATABASE_URL||loadMigrationEnvironment().DIRECT_DATABASE_URL||process.env.DATABASE_URL,max:1,connectionTimeoutMillis:15000,query_timeout:15000});
 try{
   const c=await pool.connect();
   try{

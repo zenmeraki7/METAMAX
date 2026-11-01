@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import {lockPublication} from '../../mirror/publication-lock.server.js';
 import { createHistoryExecutionAuthority } from '../execution-authority.server.js';
 import { createHistoryExecutionAdapter } from '../../services/history-execution-adapter.server.js';
 
@@ -57,6 +58,26 @@ function authorityFor(f, overrides = {}) {
 }
 
 export async function testExecutionAuthority(t, fixture, pool) {
+  await t.test('history holds the shared publication barrier until its transaction ends',async()=>{
+    const f=await fixture(),tx=await pool.connect(),writer=await pool.adminConnect(),a=authorityFor(f);
+    try{
+      await tx.query('BEGIN');await a.engine.beginScope({client:tx,write:true});await a.authority.authorizeAdmission(a.input(tx));
+      await writer.query('BEGIN');await writer.query("SET LOCAL lock_timeout='100ms'");
+      await assert.rejects(()=>lockPublication(writer,f.shopId,{write:true}),{code:'55P03'});
+      await writer.query('ROLLBACK');await tx.query('ROLLBACK');
+      await writer.query('BEGIN');await lockPublication(writer,f.shopId,{write:true});await writer.query('COMMIT');
+    }finally{await tx.query('ROLLBACK').catch(()=>{});await writer.query('ROLLBACK').catch(()=>{});tx.release();writer.release();}
+  });
+  await t.test('history rejects a SERIALIZABLE snapshot predating a publication row update',async()=>{
+    const f=await fixture(),tx=await pool.connect(),writer=await pool.adminConnect(),a=authorityFor(f);
+    try{
+      await tx.query('BEGIN ISOLATION LEVEL SERIALIZABLE');await tx.query('SELECT txid_current_snapshot()');
+      await writer.query('BEGIN');await lockPublication(writer,f.shopId,{write:true});
+      await writer.query('UPDATE mirror.publications SET published_at=clock_timestamp() WHERE shop_id=$1',[f.shopId]);await writer.query('COMMIT');
+      await a.engine.beginScope({client:tx,write:true});
+      await assert.rejects(()=>a.authority.authorizeAdmission(a.input(tx)),{code:'40001'});
+    }finally{await tx.query('ROLLBACK').catch(()=>{});await writer.query('ROLLBACK').catch(()=>{});tx.release();writer.release();}
+  });
   await t.test('execution authority keeps the real engine row lock until the caller transaction ends', async () => {
     const f = await fixture(), tx = await pool.connect(), other = await pool.adminConnect(), a = authorityFor(f);
     try {

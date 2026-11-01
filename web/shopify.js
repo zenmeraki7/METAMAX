@@ -17,7 +17,7 @@ if (process.env.DATABASE_URL && !process.env.PGSSLMODE) {
   }
 }
 
-const sessionStorage = new PostgreSQLSessionStorage(process.env.DATABASE_URL);
+const sessionStorage = new PostgreSQLSessionStorage(process.env.SHOPIFY_SESSION_DATABASE_URL||process.env.DATABASE_URL);
 
 const shopify = shopifyApp({
   api: { apiVersion: "2026-10", billing: undefined },

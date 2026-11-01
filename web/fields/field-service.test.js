@@ -15,8 +15,10 @@ describe("server-owned field service", {
     canonicalDerived: field.derived, datasets: ["products"],
   }])));
   const dependency = mock.module("./sources.js", { namedExports: { FIELD_SOURCES, SOURCE_DATASETS } });
+  // Explicit isolated adapter for generic future metafield revision tests.
+  const capability = mock.module('./write-capabilities.js',{namedExports:{WRITE_CAPABILITY_VERSION:'fixture-v1',requireInstalledWriteCapability(){}}});
   let R;
-  try { R = await import("./resolve.js?field-service"); } finally { dependency.restore(); }
+  try { R = await import("./resolve.js?field-service"); } finally { dependency.restore(); capability.restore(); }
   const SHOP = "alpha.myshopify.com";
   const ID = "product.metafield.m01234567";
   const GENERATION = "generation123";

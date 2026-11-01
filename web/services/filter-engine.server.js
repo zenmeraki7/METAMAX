@@ -20,6 +20,7 @@ import { getFilterBindingRegistry } from "../filters/bindings.js";
 import { getInstalledFilterSchemaOptions } from "./filter-schema.server.js";
 import { createFieldService } from "../fields/resolve.js";
 import { createFieldAuthorizationService } from "./field-authorization.server.js";
+import {createDatabaseInstallationResolver} from '../security/installation-lifecycle.server.js';
 import { createPublicationRepository } from "../mirror/publication-repository.server.js";
 import { createCatalogController } from "../controllers/catalog.controller.js";
 import { createCatalogQueryService } from "./catalog-query.server.js";
@@ -71,14 +72,20 @@ export function createInstalledFilterHttpRuntime(options = {}) {
     publishedContextRepository: config.publishedContextRepository ?? repository,
     fieldServiceFactory:
       config.fieldServiceFactory ??
-      (({ resolveShop, resolveSession, verifyCoverage }) => {
+      (({ resolveShop, resolveSession, resolveTenant, verifyCoverage }) => {
         const authorization = createFieldAuthorizationService({
           database: config.database,
           resolveShop,
+          resolveTenant,
           allowedOperations: ["filter", "export"],
           getShopScopes: async (shopId, authContext) => {
             const session = await resolveSession(authContext);
-            return session?.shop === shopId ? (session.scope ?? "") : "";
+            if(session?.shop!==shopId)return [];
+            const app=typeof session.scope==='string'?session.scope.split(',').map(s=>s.trim()):[];
+            if(!session.isOnline)return app;
+            const staff=new Set(typeof session.onlineAccessInfo?.associated_user_scope==='string'?
+              session.onlineAccessInfo.associated_user_scope.split(',').map(s=>s.trim()):[]);
+            return app.filter(scope=>staff.has(scope));
           },
         });
         return createFieldService({
@@ -123,7 +130,7 @@ export async function createFilterHttpRuntime({
   // A schema/migration or dataset enum is not an installed source contract.
   // Refuse bootstrap before invoking adapters or opening a database connection.
   getFilterBindingRegistry();
-  const authentication = createFilterAuthentication({ sessionStorage });
+  const authentication = createFilterAuthentication({ sessionStorage,resolveInstallation:createDatabaseInstallationResolver({database}) });
   const coverage = createMirrorCoverageService({
     repository: coverageRepository,
   });
@@ -141,6 +148,7 @@ export async function createFilterHttpRuntime({
   const fieldService = await fieldServiceFactory({
     resolveShop: authentication.resolveShop,
     resolveSession: authentication.resolveSession,
+    resolveTenant: authentication.resolveTenant,
     verifyCoverage: coverage.getVerifiedCoverage,
   });
   const secretKey =
@@ -167,6 +175,12 @@ export async function createFilterHttpRuntime({
     coverageRevision,
   }) {
     const shopId = await authentication.resolveShop(authContext);
+    // Context preparation extends retention. Require current app/staff product
+    // read permission before that metadata write, not only before selection SQL.
+    const session=await authentication.resolveSession(authContext);
+    const canRead=value=>typeof value==='string'&&value.split(',').some(s=>['read_products','write_products'].includes(s.trim()));
+    if(session.shop!==shopId||!canRead(session.scope)||session.isOnline&&!canRead(session.onlineAccessInfo?.associated_user_scope))
+      throw new FieldError(C.PERMISSION_DENIED,'Current product-read permission required');
     const routing =
       cursor === undefined ? {} : cursors.readContext(cursor, shopId);
     if (

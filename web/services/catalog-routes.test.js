@@ -1,3 +1,4 @@
+import {createInstallationResolver} from '../security/installation-lifecycle.server.js';
 import test from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
@@ -18,9 +19,10 @@ const catalogRequests = [
 
 async function withRouter(kind, mode, callback) {
   const calls = [];
-  const session = { id: "session", shop: "owner.myshopify.com", accessToken: "stored-token" };
+  const session = { id: "session", shop: "owner.myshopify.com", accessToken: "stored-token",isOnline:false };
   let stored = session;
   const authentication = createFilterAuthentication({
+    resolveInstallation:createInstallationResolver({readInstallation:async()=>({installation_version:"test-installation"})}),
     sessionStorage: { async loadSession() { return stored; } },
   });
   const app = express();

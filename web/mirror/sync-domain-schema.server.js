@@ -102,7 +102,7 @@ export async function inspectSyncDomainSchema(tx, { mapping, execution, catalog,
     ['sync_dispatch_recovery_evidence',['shop_id'],'shops',['id']],
   ]) if (!foreign(table,fields,target,targets)) reject(`Missing tenant-bound domain relation: ${table}`);
   const status = found.ingestion_runs.columns.find(c => c.name === 'status');
-  if (!equal(status.enum_values,['PENDING','RUNNING','RETRY','SUCCEEDED','FAILED','CANCELLED'])) reject('Incompatible SyncRun WorkStatus');
+  if (!equal(status.enum_values,['PENDING','RUNNING','RETRY','SUCCEEDED','PARTIAL','FAILED','CANCELLED'])) reject('Incompatible SyncRun WorkStatus');
   const triggers = await tx.$queryRawUnsafe(`SELECT c.relname AS relation,t.tgname AS name,t.tgenabled AS enabled
     FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace
     WHERE n.nspname='mirror' AND NOT t.tgisinternal AND c.relname IN

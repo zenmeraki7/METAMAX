@@ -100,7 +100,7 @@ test("safe cleanup: never reclaims a generation if published, active lease, appr
   const publishedMock = {
     async query(sql) {
       if (sql.includes("FROM mirror.generations WHERE shop_id = $1 AND id = $2 FOR UPDATE")) {
-        return { rows: [{ id: "gen-pub", status: "PUBLISHED", retain_until: null }] };
+        return { rows: [{ id: "gen-pub", status: "PUBLISHED", retain_until: new Date(Date.now()-60000).toISOString() }] };
       }
       if (sql.includes("UNION ALL")) {
         return { rows: [{ "?column?": 1 }], rowCount: 1 };
@@ -117,7 +117,7 @@ test("safe cleanup: never reclaims a generation if published, active lease, appr
   const leaseMock = {
     async query(sql) {
       if (sql.includes("FROM mirror.generations WHERE shop_id = $1 AND id = $2 FOR UPDATE")) {
-        return { rows: [{ id: "gen-lease", status: "RETIRED", retain_until: null }] };
+        return { rows: [{ id: "gen-lease", status: "RETIRED", retain_until: new Date(Date.now()-60000).toISOString() }] };
       }
       if (sql.includes("UNION ALL")) {
         return { rows: [{ "?column?": 1 }], rowCount: 1 };
@@ -134,7 +134,7 @@ test("safe cleanup: never reclaims a generation if published, active lease, appr
   const opMock = {
     async query(sql) {
       if (sql.includes("FROM mirror.generations WHERE shop_id = $1 AND id = $2 FOR UPDATE")) {
-        return { rows: [{ id: "gen-op", status: "RETIRED", retain_until: null }] };
+        return { rows: [{ id: "gen-op", status: "RETIRED", retain_until: new Date(Date.now()-60000).toISOString() }] };
       }
       if (sql.includes("UNION ALL")) {
         return { rows: [{ "?column?": 1 }], rowCount: 1 };

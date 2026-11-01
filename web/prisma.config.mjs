@@ -1,10 +1,11 @@
+import {loadMigrationEnvironment} from './security/migration-environment.server.js';
 // Prisma CLI only. The application continues to use its existing pg pool.
 // Migrations require a direct connection supplied explicitly by the operator.
 import { existsSync, readFileSync } from "node:fs";
 import dotenv from "dotenv";
 
 const envFile = new URL("./.env", import.meta.url);
-const local = existsSync(envFile) ? dotenv.parse(readFileSync(envFile)) : {};
+const local = loadMigrationEnvironment();
 
 export default {
   schema: "prisma",

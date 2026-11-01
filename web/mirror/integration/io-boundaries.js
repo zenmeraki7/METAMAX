@@ -9,11 +9,14 @@ import {createCursorService} from "../../filters/pagination.js";
 import {createSavedFiltersService} from "../../services/saved-filters.server.js";
 import {createImportPreviewService} from "../../services/import-preview.server.js";
 import {createApprovalService} from "../../services/approval.server.js";
-import {createExportService,EXPORT_FIELD_IDS} from "../../services/export.server.js";
+import {createLegacyArtifactExportService,EXPORT_FIELD_IDS} from "../../services/export.server.js";
 import {createFilterExecutor} from "../../filters/execute.js";
 import {createCatalogQueryService} from "../../services/catalog-query.server.js";
 import {createSelectionService} from "../../services/selection.server.js";
 import {currentCoverageTransaction} from "../coverage-transaction.server.js";
+import {createRestrictedRuntimeProfiles} from '../../security/test-support/restricted-runtime.js';
+import {createDatabaseInstallationResolver} from '../../security/installation-lifecycle.server.js';
+import {createJobDispatchService} from '../../services/job-dispatch.server.js';
 
 export async function testIoBoundaries(t,{pool,shopId,generationId,authentication,authContext,session,repository,publication,coverage,allRows}) {
   const originalScope=session.scope;session.scope="read_products,write_products";session.merchantId="merchant-fixture";
@@ -71,11 +74,27 @@ export async function testIoBoundaries(t,{pool,shopId,generationId,authenticatio
       const bypass=createApprovalService({database:pool});
       await assert.rejects(()=>bypass.approveContract({shopId,snapshotId:preview.snapshotId,operation:"import",approvedBy:"forged",contractPayload:{rows:[]}}));
     });
+    await t.test('approved import previews hand off exact row mappings to durable execution items',async()=>{
+      const preview=await imports.createImportPreview({authContext,records:[{id:String(allRows[0].id),title:'First row'},{id:allRows[1].shopify_id,vendor:'Second row'}]});
+      const approved=await imports.approveImportPreview({authContext,previewId:preview.previewId,expectedPreviewHash:preview.previewHash});
+      const profiles=await createRestrictedRuntimeProfiles(pool,process.env.FILTER_TEST_DATABASE_URL);
+      try{
+        const dispatch=createJobDispatchService({database:profiles.merchant,approvalService:approval,resolveShop:authentication.resolveShop,
+          resolveTenant:async context=>createDatabaseInstallationResolver({database:profiles.merchant})(await authentication.resolveShop(context)),
+          authorizeWrite:async({authContext:context})=>(await authentication.resolveSession(context)).scope.split(',').includes('write_products')});
+        const receipt=await dispatch.dispatchImport({authContext,contractId:approved.contractId});
+        assert.equal(receipt.itemCount,2);
+        const items=(await pool.query('SELECT resource_id,intended_values FROM mirror.job_items WHERE shop_id=$1 AND command_id=$2 ORDER BY resource_id',[shopId,receipt.commandId])).rows;
+        const expected=[{resource_id:allRows[0].shopify_id,intended_values:{title:'First row'}},{resource_id:allRows[1].shopify_id,intended_values:{vendor:'Second row'}}].sort((a,b)=>a.resource_id.localeCompare(b.resource_id));
+        assert.deepEqual(items,expected);
+        assert.equal((await dispatch.dispatchImport({authContext,contractId:approved.contractId})).commandId,receipt.commandId);
+      }finally{await profiles.close();}
+    });
     await t.test("export pins a verified installation and approved membership, and registers only durable files",async()=>{
       const evidenceId=randomUUID();
       await pool.query("INSERT INTO mirror.catalog_import_jobs(id,shop_id,installation_version,status,generation_id) VALUES($1,$2,'selection-install','SUCCEEDED',$3)",[evidenceId,shopId,generationId]);
       const physicalSchema=await verifyInstalledFilterSchema({database:pool});
-      const exports=createExportService({database:pool,resolveShop:authentication.resolveShop,publicationService:publication,publicationRepository:repository,
+      const exports=createLegacyArtifactExportService({database:pool,resolveShop:authentication.resolveShop,publicationService:publication,publicationRepository:repository,
         approvalService:approval,fieldService,physicalSchema,authorizeExport:async({authContext:context})=>(await authentication.resolveSession(context)).scope.includes("read_products")});
       const prepare=async format=>{
         const snapshot=await selections.createSelection({authContext,productIds:allRows.slice(0,2).map(row=>row.id),operation:"export"});
@@ -98,7 +117,7 @@ export async function testIoBoundaries(t,{pool,shopId,generationId,authenticatio
       await assert.rejects(()=>exports.generateExportArtifact({authContext,exportJobId:json.exportJobId}));
       await assert.rejects(()=>exports.createExportJob({authContext,commandId:json.command,generationId:"unverified"}));
       const file=writer(),write=file.write;let checkedLocks=false;
-      file.write=async buffer=>{if(!checkedLocks){checkedLocks=true;const peer=await pool.connect();try{await peer.query("BEGIN");await peer.query("SET LOCAL lock_timeout='100ms'");await publication.lockForWrite(peer);}finally{await peer.query("ROLLBACK");peer.release();}}return write(buffer);};
+      file.write=async buffer=>{if(!checkedLocks){checkedLocks=true;const peer=await pool.connect();try{await peer.query("BEGIN");await peer.query("SET LOCAL lock_timeout='100ms'");await publication.lockForWrite(peer,shopId);}finally{await peer.query("ROLLBACK");peer.release();}}return write(buffer);};
       const artifact=await exports.generateExportArtifact({authContext,exportJobId:json.exportJobId,writer:file});
       assert.equal(artifact.rowCount,2);
       const lines=(await readFile(file.final,"utf8")).trim().split("\n").map(line=>JSON.parse(line));
@@ -108,7 +127,7 @@ export async function testIoBoundaries(t,{pool,shopId,generationId,authenticatio
       await exports.generateExportArtifact({authContext,exportJobId:csv.exportJobId,writer:csvFile});
       const header=(await readFile(csvFile.final,"utf8")).split("\r\n")[0];assert.ok(header.includes('"published_at","tags"'));
       for(const limits of [{maxRows:1},{maxBytes:1}]){
-        const limited=createExportService({database:pool,resolveShop:authentication.resolveShop,publicationService:publication,publicationRepository:repository,
+        const limited=createLegacyArtifactExportService({database:pool,resolveShop:authentication.resolveShop,publicationService:publication,publicationRepository:repository,
           approvalService:approval,fieldService,physicalSchema,authorizeExport:async()=>true,...limits});
         const job=await prepare("jsonl"),file=writer();
         await assert.rejects(()=>limited.generateExportArtifact({authContext,exportJobId:job.exportJobId,writer:file}),/budget exceeded/);
@@ -153,7 +172,7 @@ export async function testIoBoundaries(t,{pool,shopId,generationId,authenticatio
       const commitDb={query:(...args)=>pool.query(...args),async connect(){const client=await pool.connect();let final=false;
         return {release:()=>client.release(),async query(sql,...args){const result=await client.query(sql,...args);if(sql.includes("INSERT INTO mirror.job_artifacts"))final=true;
           if(sql==="COMMIT"&&final)throw Error("final COMMIT response lost");return result;}};}};
-      const uncertainExports=createExportService({database:commitDb,resolveShop:authentication.resolveShop,publicationService:publication,publicationRepository:repository,
+      const uncertainExports=createLegacyArtifactExportService({database:commitDb,resolveShop:authentication.resolveShop,publicationService:publication,publicationRepository:repository,
         approvalService:approval,fieldService,physicalSchema,authorizeExport:async()=>true});
       const committed=await uncertainExports.generateExportArtifact({authContext,exportJobId:uncertain.exportJobId,writer:uncertainWriter});
       assert.equal(committed.rowCount,2);assert.equal(aborted,false);assert.ok((await stat(uncertainWriter.final)).size>0);

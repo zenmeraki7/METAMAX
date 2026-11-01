@@ -121,9 +121,9 @@ export function createCatalogController({
         });
         const query = await compiler.compileFilter(validated, {
           authContext,
-          pageSize: mode === "status" ? 1 : pageSize,
-          ...(cursor ? { cursor } : {}),
-          catalog: true,
+          pageSize: mode === "search" ? pageSize : 1,
+          ...(cursor && mode === "search" ? { cursor } : {}),
+          catalog: mode === "status" ? "status" : mode === "count" ? "count" : true,
         });
         const result = await executor.execute({ query, authContext });
         if (mode === "count")

@@ -5,6 +5,7 @@ enum WorkStatus {
   RUNNING
   RETRY
   SUCCEEDED
+  PARTIAL
   FAILED
   CANCELLED
 
@@ -13,6 +14,7 @@ enum WorkStatus {
 
 // Durable command is the source of truth; BullMQ carries only its identity.
 model JobCommand {
+  finalization OperationFinalization?
   id                BigInt              @id @default(autoincrement())
   shopId            String              @map("shop_id") @db.Text
   installationVersion String?            @map("installation_version") @db.Text
@@ -44,6 +46,7 @@ model JobCommand {
   @@unique([shopId, id])
   @@unique([shopId, idempotencyKey])
   @@unique([shopId, kind, contractId], map: "job_commands_approved_operation_key")
+  @@index([kind,status,id],map:"operation_finalization_command_scan")
   @@map("job_commands")
   @@schema("mirror")
 }
@@ -51,6 +54,7 @@ model JobCommand {
 // Scheduling stores an operation template, never a reusable authorization grant.
 // Each occurrence resolves fresh fields, coverage, approval and a new selection.
 model JobSchedule {
+  installationVersion String? @map("installation_version") @db.Text
   id         BigInt    @id @default(autoincrement())
   shopId     String    @map("shop_id") @db.Text
   enabled    Boolean   @default(false)
@@ -72,6 +76,8 @@ model JobSchedule {
 }
 
 model ScheduleOccurrence {
+  executionResult Json? @map("execution_result") @db.JsonB
+  installationVersion String? @map("installation_version") @db.Text
   id String @id @db.Text
   shopId String @map("shop_id") @db.Text
   scheduleId BigInt @map("schedule_id")

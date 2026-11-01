@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import useProductCapabilities from '../hooks/useProductCapabilities.js';
 import { useSearchParams } from "react-router-dom";
 import ProductsInsights from "../components/products/ProductsInsights.jsx";
 import ProductsToolbar from "../components/products/ProductsToolbar.jsx";
@@ -12,6 +13,7 @@ const EMPTY_PRODUCTS = [];
 export default function ProductsPage() {
   const [params] = useSearchParams();
   const catalog = useProductCatalog(params.get("search") ?? "");
+  const capabilities=useProductCapabilities(catalog.data?.snapshotId,catalog.data?.publishedRevision,catalog.error);
   const products = catalog.data?.products ?? EMPTY_PRODUCTS;
   const selection = useProductSelection(products);
   const [density, setDensity] = useState("comfortable");
@@ -116,6 +118,7 @@ export default function ProductsPage() {
         )}
         <ProductsInsights summary={hasCatalog ? catalog.data.summary : null} />
         <ProductsToolbar
+          capabilities={capabilities}
           search={catalog.search}
           setSearch={catalog.setSearch}
           status={catalog.status}

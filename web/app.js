@@ -1,19 +1,26 @@
 import express from "express";
+import { createSyncSourcesService } from './services/sync-sources.server.js';
+import { createTenantSourcesRepository } from './security/repositories/sync-sources.server.js';
+import { TenantSecurityError } from './security/tenant.server.js';
+import { TenantDatabaseError } from './security/tenant-db.server.js';
+import { describeFilterFailure } from './filters/errors.js';
 import serveStatic from "serve-static";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createWebhookHandlers } from "./privacy.js";
 import productCreator from "./product-creator.js";
-import { createShopifyAuthMiddleware } from "./middleware/shopify-auth.js";
+import { createShopifyAuthMiddleware, createInstallationGuard } from "./middleware/shopify-auth.js";
+import { createDatabaseInstallationResolver } from "./security/installation-lifecycle.server.js";
 import { createFilterAuthentication } from "./middleware/filter-auth.server.js";
 import { createFiltersRouter } from "./routes/filters.routes.js";
 import { createCatalogRouter } from "./routes/catalog.routes.js";
 import { createCatalogImportRouter } from "./routes/catalog-import.routes.js";
-import {createExportRouter} from "./routes/export.routes.js";
-import {createExportControlRouter} from "./export/export-control.routes.js";
+import { createExportRouter } from "./routes/export.routes.js";
+import { createExportControlRouter } from "./export/export-control.routes.js";
 import { createHistoryRouter } from "./edit-history/history.routes.js";
+import {hasCurrentProductWrite} from './middleware/product-permission.server.js';
 
-export function createApp({ shopify, staticPath, filterRuntime = null, catalogImportService = null, exportRuntime = null, apiKey = process.env.SHOPIFY_API_KEY || "", development = process.env.NODE_ENV === "development", database = null, reconciliationService = null,historyPrivacyService=null }) {
+export function createApp({ shopify, staticPath, filterRuntime = null, catalogImportService = null, exportRuntime = null, apiKey = process.env.SHOPIFY_API_KEY || "", development = process.env.NODE_ENV === "development", database = null, lifecycleDatabase = null, installationDatabase = database, tenantReadPool = null, reconciliationService = null, historyPrivacyService = null }) {
   const app = express();
   app.disable("x-powered-by");
   app.use(shopify.cspHeaders());
@@ -33,25 +40,32 @@ export function createApp({ shopify, staticPath, filterRuntime = null, catalogIm
     shopify.config.webhooks.path,
     shopify.processWebhooks({
       webhookHandlers: createWebhookHandlers(shopify.config.sessionStorage, {
-        database,
+        database:lifecycleDatabase,
         reconciliationService,
         historyPrivacyService,
       }),
     }),
   );
+  // No nested webhook URL may fall through to merchant session authentication.
+  app.use(shopify.config.webhooks.path,(_req,res)=>res.status(404).json({error:'WEBHOOK_ROUTE_NOT_FOUND'}));
   // Both routers require the same opaque request authentication contract even
   // when the mirror query runtime is unavailable. Capture only after Shopify
   // has verified the request; res.locals alone is never route authority.
+  const resolveInstallation = installationDatabase?.connect
+    ? createDatabaseInstallationResolver({ database: installationDatabase })
+    : null;
   const authentication = filterRuntime?.authentication ?? createFilterAuthentication({
     sessionStorage: shopify.config.sessionStorage,
+    resolveInstallation,
   });
   const capture = filterRuntime?.capture ?? authentication.capture;
   app.use("/api", createShopifyAuthMiddleware({ shopify }));
-  if(exportRuntime) {
-    app.use("/api/exports",exportRuntime.authentication.capture,createExportRouter({authenticate:exportRuntime.authentication.authenticate,exportService:exportRuntime.service}));
-    app.use("/api/exports",createExportControlRouter({...exportRuntime,database}));
+  app.use("/api", createInstallationGuard({ database: installationDatabase, sessionStorage: shopify.config.sessionStorage }));
+  if (exportRuntime) {
+    app.use("/api/exports", exportRuntime.authentication.capture, createExportRouter({ authenticate: exportRuntime.authentication.authenticate, exportService: exportRuntime.service }));
+    app.use("/api/exports", createExportControlRouter({ ...exportRuntime, database }));
   } else {
-    app.use("/api/exports",(_req,res)=>res.status(503).json({error:"EXPORT_UNAVAILABLE"}));
+    app.use("/api/exports", (_req, res) => res.status(503).json({ error: "EXPORT_UNAVAILABLE" }));
   }
   app.use("/api/filters", createFiltersRouter({ runtime: filterRuntime }));
   app.use(
@@ -74,29 +88,28 @@ export function createApp({ shopify, staticPath, filterRuntime = null, catalogIm
     catch (error) { next(error); }
   }, capture, filterRuntime?.catalogStatus ?? unavailable);
   app.get("/api/products/count", capture, filterRuntime?.catalogCount ?? unavailable);
-  app.get("/api/shopify-data/sources", capture, async (_req, res) => {
+  app.get("/api/mirror/count", capture, filterRuntime?.catalogCount ?? unavailable);
+  const syncSources = tenantReadPool ? createSyncSourcesService({ repository: createTenantSourcesRepository({ pool: tenantReadPool, authentication }), authentication }) : null;
+  app.get("/api/shopify-data/sources", capture, async (req, res) => {
     res.setHeader("Cache-Control", "private, no-store");
-    res.json({
-      shopTimeZone: "UTC",
-      sources: [
-        { id: "products", name: "Products & Variants", icon: "bag", syncType: "automatic", status: "healthy", lastFullSyncAt: new Date().toISOString() },
-        { id: "collections", name: "Collections", icon: "layers", syncType: "automatic", status: "healthy", lastFullSyncAt: new Date().toISOString() },
-        { id: "inventory", name: "Inventory Levels", icon: "box", syncType: "automatic", status: "healthy", lastFullSyncAt: new Date().toISOString() },
-        { id: "metafields", name: "Metafield Definitions", icon: "receipt", syncType: "automatic", status: "healthy", lastFullSyncAt: new Date().toISOString() },
-      ],
-    });
-  });
-  app.post("/api/shopify-data/refresh", capture, async (req, res, next) => {
     try {
-      const session = res.locals.shopify?.session;
-      if (!session) return res.status(401).json({ error: "UNAUTHENTICATED" });
-      const job = await catalogImportService?.enqueue(session);
-      return res.status(202).json({ jobId: job?.id || "sync-queued" });
-    } catch (err) { next(err); }
+      const authContext = await authentication.authenticate(req);
+      if (!authContext) return res.status(401).json({ error: 'UNAUTHENTICATED' });
+      if (Object.keys(req.query).length) return res.status(400).json({ error: 'INVALID_SOURCE_QUERY' });
+      if (!syncSources) return res.status(503).json({ error: 'SOURCES_UNAVAILABLE' });
+      return res.json(await syncSources.read({ authContext }));
+    } catch (error) {
+      if (error instanceof TenantSecurityError && [401, 403].includes(error.status) || error instanceof TenantDatabaseError && ['INSTALLATION_NOT_ACTIVE', 'WORKER_CLAIM_REVOKED'].includes(error.code))
+        return res.status(403).json({ error: 'FILTER_PERMISSION_DENIED', retryable: false });
+      const failure = describeFilterFailure(error); return res.status(failure.status === 500 ? 503 : failure.status).json({ error: failure.status === 500 ? 'SOURCES_UNAVAILABLE' : failure.code, retryable: failure.status === 500 || failure.retryable });
+    }
   });
-  app.post("/api/products", async (_req, res) => {
+  app.post("/api/products", capture, async (req, res) => {
     try {
-      await productCreator(shopify, res.locals.shopify.session);
+      const session=await authentication.authenticateSession(req);
+      if(!session)return res.status(401).json({error:'UNAUTHENTICATED'});
+      if(!hasCurrentProductWrite(session))return res.status(403).json({error:'PRODUCT_WRITE_PERMISSION_DENIED'});
+      await productCreator(shopify, session);
       res.status(200).json({ success: true, error: null });
     } catch (error) {
       console.error("[app] Failed to create sample products:", error.name || "Error");
