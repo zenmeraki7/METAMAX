@@ -15,7 +15,7 @@ import {join} from 'node:path';
 import pg from 'pg';
 import {loadMigrationEnvironment} from '../security/migration-environment.server.js';
 import {verifyRuntimeDatabase,readDatabaseSecurityState} from '../security/runtime-database.server.js';
-const mode=process.argv[2];if(!['rehearse','apply'].includes(mode))throw Error('Expected rehearse or apply');
+const mode=process.argv[2];if(!['rehearse','apply','verify'].includes(mode))throw Error('Expected rehearse, apply or verify');
 const web=fileURLToPath(new URL('../',import.meta.url));
 const audit=fileURLToPath(new URL('../../.audit/startup-repair/',import.meta.url));await mkdir(audit,{recursive:true});
 const live=new URL(loadMigrationEnvironment().DIRECT_DATABASE_URL);
@@ -55,7 +55,7 @@ try{
    const verified=await profiles(test,local);const final=await counts(test);if(JSON.stringify(baseline)!==JSON.stringify(final))throw Error('Catalog or shop row counts changed');
    const report={passed:true,before,pending,files,baseline,after,verified,applicationDatabaseChanged:false};await writeFile(join(audit,'rehearsal.json'),JSON.stringify(report,null,2));console.log(JSON.stringify({rehearsalPassed:true,migrations:after.length,profiles:Object.keys(verified),preserved:final}));
   }finally{await test.end();}
- }else{
+ }else if(mode==='apply'){
   const report=JSON.parse(await readFile(join(audit,'rehearsal.json'),'utf8'));
   if(!report.passed||JSON.stringify(report.files)!==JSON.stringify(files)||JSON.stringify(report.before)!==JSON.stringify(before))throw Error('Rehearsed files or live lineage changed');
   const leases=(await owner.query('SELECT count(*)::int AS n FROM mirror.catalog_import_executions WHERE completed_at IS NULL AND lease_token IS NOT NULL AND lease_until>clock_timestamp()')).rows[0].n;if(leases)throw Error('Active catalog workers must drain');
@@ -63,5 +63,16 @@ try{
   await migrate(live,'live');const after=await history(owner);const verified={pendingCredentialProvisioning:true},final=await counts(owner);
   if(JSON.stringify(baseline)!==JSON.stringify(final))throw Error('Catalog or shop row counts changed');
   await writeFile(join(audit,'live-verification.json'),JSON.stringify({after,verified,preserved:final},null,2));console.log(JSON.stringify({deployed:true,migrations:after.length,profiles:Object.keys(verified),preserved:final}));
+ }else{
+  if(pending.length)throw Error('Pending migrations remain');
+  const local=loadMigrationEnvironment(),verified={};
+  for(const [profile,variable] of [['merchant','DATABASE_URL'],['catalogWorker','CATALOG_WORKER_DATABASE_URL'],['operationWorker','OPERATION_WORKER_DATABASE_URL']]){
+   if(!local[variable])throw Error('Missing '+variable);const runtime=pool(new URL(local[variable]));
+   try{verified[profile]=await verifyRuntimeDatabase(runtime,{profile});}finally{await runtime.end();}
+  }
+  const u=new URL(live);u.searchParams.set('schema','mirror');
+  await run(process.execPath,[prisma,'migrate','status','--config','prisma.config.mjs'],{env:{DIRECT_DATABASE_URL:u.href},log:'live-status.log'});
+  const report={migrations:before.length,pending:[],verified,preserved:await counts(owner)};
+  await writeFile(join(audit,'live-verification.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report));
  }
 }catch(e){console.error(redact(e.message));process.exitCode=1;}finally{await owner.end();if(container)run('docker',['rm','--force',container]);}
