@@ -88,9 +88,9 @@ export default function ProductsToolbar({
     setValue("");
   };
   return (
-    <s-section accessibilityLabel="Product filters">
-      <s-stack gap="base">
-        <s-text type="strong">Search products</s-text>
+    <s-section padding="none" accessibilityLabel="Product filters">
+      <div className="products-toolbar">
+      <s-stack gap="small">
         <div className="products-toolbar-top">
           <s-select
             label="Product status"
@@ -364,6 +364,7 @@ export default function ProductsToolbar({
           </s-box>
         </s-popover>
       </s-stack>
+      </div>
     </s-section>
   );
 }

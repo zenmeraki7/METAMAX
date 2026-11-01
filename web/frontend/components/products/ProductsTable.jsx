@@ -220,11 +220,15 @@ export default function ProductsTable({
         )}
 
         {showLoading && (
-          <s-box padding="large">
-            <s-stack gap="small" alignItems="center">
+          <s-box padding="base">
+            <s-stack gap="base">
+              <s-stack direction="inline" gap="small" alignItems="center">
               <s-spinner accessibilityLabel="Loading products" />
-
-              <s-text color="subdued">Loading products…</s-text>
+                <s-text color="subdued">Loading products…</s-text>
+              </s-stack>
+              <div className="products-skeleton" aria-hidden="true">
+                {[0, 1, 2, 3].map(row => <div className="products-skeleton__row" key={row}><span className="products-skeleton__image" /><span className="products-skeleton__title" /><span /><span /></div>)}
+              </div>
             </s-stack>
           </s-box>
         )}
@@ -232,6 +236,8 @@ export default function ProductsTable({
         {showEmpty && (
           <s-box padding="large">
             <s-stack gap="small" alignItems="center">
+              <s-icon type="product" color="subdued" size="large" />
+              <s-heading>Your catalog starts here</s-heading>
               <s-text color="subdued">{emptyMessage}</s-text>
             </s-stack>
           </s-box>

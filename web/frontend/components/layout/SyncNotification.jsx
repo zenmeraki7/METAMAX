@@ -1,5 +1,6 @@
 import {useEffect, useRef, useState} from "react";
-import useSyncProgress, {syncActive} from "../../hooks/useSyncProgress.js";
+import {syncActive} from "../../hooks/useSyncProgress.js";
+import {useSharedSyncProgress} from "../../hooks/SyncProgressContext.js";
 
 export function SyncProgressNotice({job,error}) {
   const observed = useRef(null);
@@ -35,5 +36,5 @@ export function SyncProgressNotice({job,error}) {
 }
 
 export default function SyncNotification() {
-  return <SyncProgressNotice {...useSyncProgress()} />;
+  return <SyncProgressNotice {...useSharedSyncProgress()} />;
 }

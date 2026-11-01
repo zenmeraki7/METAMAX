@@ -11,7 +11,7 @@ test('progress uses committed counts, supports bigint totals and reserves 100 fo
   assert.equal(catalogImportProgress({phase:'INGESTING',processed_lines:'5',expected_lines:null}).percent,20);
   assert.equal(catalogImportProgress({status:'SUCCEEDED',generation_status:'VERIFIED',phase:'PUBLISHING'}).percent,95);
   assert.deepEqual(catalogImportProgress({status:'SUCCEEDED',generation_status:'PUBLISHED'}),{
-    percent:100,estimated:false,stage:'Your catalog mirror is ready',processedLines:null,expectedLines:null});
+    percent:100,estimated:false,stage:'Your catalog mirror is ready',processedLines:null,expectedLines:null,productsSaved:null});
 });
 test('retry, review, cancellation and uncertainty retain phase progress without claiming completion',()=>{
   assert.match(catalogImportProgress({status:'RETRY',phase:'INGESTING'}).stage,/retry/);
@@ -19,4 +19,12 @@ test('retry, review, cancellation and uncertainty retain phase progress without 
   assert.match(catalogImportProgress({status:'RUNNING',outcome_uncertain:true}).stage,/Verifying/);
   assert.match(catalogImportProgress({status:'CANCELLED'}).stage,/cancelled/);
   assert.match(catalogImportProgress({status:'FAILED'}).stage,/could not/);
+});
+
+test('saved products are a distinct exact database count, never inferred from JSONL lines',()=>{
+ const progress=catalogImportProgress({phase:'INGESTING',products_saved:'123456789012345678',processed_lines:'999',expected_lines:'1000'});
+ assert.equal(progress.productsSaved,'123456789012345678');
+ assert.equal(catalogImportProgress({processed_lines:'999'}).productsSaved,null);
+ assert.equal(catalogImportProgress({products_saved:'0'}).productsSaved,'0');
+ for(const value of ['-1','NaN','1.5'])assert.equal(catalogImportProgress({products_saved:value}).productsSaved,null);
 });

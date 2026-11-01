@@ -7,14 +7,17 @@ const METRICS = Object.freeze([
   {
     key: "productCount",
     label: "Total products",
+    icon: "product",
   },
   {
     key: "variantCount",
     label: "Total variants",
+    icon: "variant",
   },
   {
     key: "activeCount",
     label: "Active products",
+    icon: "check-circle",
   },
 ]);
 
@@ -46,23 +49,19 @@ function formatCount(value) {
 
 export default function ProductsInsights({ summary }) {
   return (
-    <s-query-container>
-      <s-grid
-        accessibilityLabel="Catalog overview"
-        gridTemplateColumns="@container (inline-size > 420px) '1fr 1fr', (inline-size > 700px) '1fr 1fr 1fr', '1fr'"
-        gap="base"
-      >
-        {METRICS.map(({ key, label }) => (
-          <s-grid-item key={key}>
-            <s-section heading={label}>
-              <s-heading>
-                {formatCount(summary?.[key])}
-              </s-heading>
-            </s-section>
-          </s-grid-item>
+    <s-section padding="none" accessibilityLabel="Catalog overview">
+      <div className="products-summary">
+        {METRICS.map(({ key, label, icon }) => (
+          <div className="products-summary__metric" key={key}>
+            <s-stack direction="inline" gap="small" alignItems="center">
+              <s-icon type={icon} tone={key === "activeCount" ? "success" : "auto"} />
+              <s-text color="subdued">{label}</s-text>
+            </s-stack>
+            <strong className="products-summary__value" aria-label={summary ? undefined : `${label} available after sync`}>{formatCount(summary?.[key])}</strong>
+          </div>
         ))}
-      </s-grid>
-    </s-query-container>
+      </div>
+    </s-section>
   );
 }
 

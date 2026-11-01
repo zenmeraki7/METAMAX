@@ -21,5 +21,6 @@ export function catalogImportProgress(row) {
   else if (row.status === "FAILED") stage = "Sync could not finish";
   else if (row.outcome_uncertain) stage = "Verifying the previous sync attempt";
   else if (row.status === "RETRY") stage = "Sync paused; a retry is scheduled";
-  return {percent, estimated: !complete, stage, processedLines: processed, expectedLines: expected};
+  const productsSaved = /^\d+$/.test(String(row.products_saved ?? "")) ? String(row.products_saved) : null;
+  return {percent, estimated: !complete, stage, processedLines: processed, expectedLines: expected, productsSaved};
 }

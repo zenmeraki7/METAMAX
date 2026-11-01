@@ -34,7 +34,7 @@ s-box {
 }
 
 /* Persistent app header notification, shared across route changes. */
-.sync-notification { position: fixed; top: 12px; right: 20px; z-index: 500; width: min(370px, calc(100vw - 32px)); color: #202223; background: #fff; border: 1px solid #d9dedc; border-radius: 12px; box-shadow: 0 8px 28px #0000001f; font: 14px/1.5 system-ui, sans-serif; }
+.sync-notification { position: fixed; bottom: 24px; right: 20px; z-index: 500; width: min(340px, calc(100vw - 32px)); color: #202223; background: #fff; border: 1px solid #d9dedc; border-radius: 12px; box-shadow: 0 8px 28px #0000001f; font: 14px/1.5 system-ui, sans-serif; }
 .sync-notification__header { display: flex; align-items: center; gap: 10px; width: 100%; padding: 13px 16px; background: transparent; color: inherit; border: 0; border-radius: 12px; cursor: pointer; text-align: left; font: inherit; }
 .sync-notification__header strong { flex: 1; font-weight: 600; }
 .sync-notification__header:focus-visible, .sync-notification__dismiss:focus-visible { outline: 2px solid #005bd3; outline-offset: 2px; }

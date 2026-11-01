@@ -31,6 +31,37 @@ The records below cover the critical mutation pipeline. They are not a claim tha
 
 ## Shared schemas and boundaries
 
+### Catalog sync live progress
+
+Owners: `createCatalogImportService.status(session, id)` and `.current(session)`
+in `web/services/catalog-import.server.js`; exposed by authenticated
+`GET /api/mirror/sync/:id` and `GET /api/mirror/sync`.
+
+Input: server-loaded Shopify session; status additionally requires a validated
+opaque import ID. Browser shop/generation/count values are never accepted.
+Output: existing job DTO (or null where permitted), with nullable decimal-string
+`progress.productsSaved`. This is the number of committed nondeleted product rows
+in that job's exact shop and generation at the query snapshot. It is not JSONL
+lines, a Shopify export estimate, or a declaration that staging data is published.
+No total product count is invented; existing percentage remains explicitly
+estimated until the job succeeds and its generation is PUBLISHED.
+
+Authority: service authentication reloads the session and current product-read
+scope before and after the read; current-job discovery joins the live installation.
+The query binds authenticated shop and stored job generation. `readProgress` owns
+a READ ONLY transaction, a transaction-local tenant GUC for product RLS, a 5-second
+statement timeout, commit/rollback, and client release. No publication or mutation
+lock is acquired. Calls do not authorize any filtering or mutation against staging.
+Status reads have no durable effects; current-job discovery preserves its existing
+initial-sync repair behavior when no job exists. Read-response loss may be retried;
+this change adds no Shopify calls or writes and changes no mutation retry policy.
+
+Counting uses the existing tenant/generation product scope and is not a cached
+estimate. Its cost grows with that generation's rows; this change does not certify
+merchant-scale polling performance. The UI shares one serial poller, uses a
+3-second active interval, slower idle discovery, visibility pausing, bounded
+backoff and timeouts, and preserves the last confirmed values on transient errors.
+
 - IDs crossing service boundaries are strings; bounded counts are safe integers; service timestamps are ISO strings. PostgreSQL rows remain internal to repositories.
 - `SelectionSnapshot` is the frozen DTO returned by [selection-snapshot.server.js](../web/services/selection-snapshot.server.js): snapshot/shop/installation IDs, generation/coverage/mapping coordinates, operation and operation ID, target mode, status, selected count/hash, registry/definition metadata, and frozen/expiry timestamps. It contains no product array or SQL capability.
 - `ExecutionAuthority` is the immutable projection defined in [execution-contract.server.js](../web/services/execution-contract.server.js). Its mandatory coordinates and database mappings are documented in [CT-106–120](ct-106-120-authority-and-lifecycle.md). It is metadata, not a bearer permission grant. The final verified contract hash is projected outside its own hashed payload.

@@ -1,231 +1,232 @@
 # Phase 1 Filter Engine Integration and Verification Report
 
-**Branch:** `feature/filter-phase-1`  
-**Database Engine:** PostgreSQL 18-alpine (via disposable container runner)  
-**Date:** 2026-11-01  
-**Status:** **PASSED (100% Verified)**
+**Branch:** `feature/filter-phase-1`
+**Date:** 2026-11-01
+**Database:** Disposable local PostgreSQL 18-alpine
+**Result:** Phase 1 suite reproduced: **21 passed, 0 failed, 0 skipped, 9 suites**.
 
----
+**Sign-off boundary:** These results cover filtering and persisted selection
+snapshots. They do **not** verify the complete approved-selection-to-Shopify-
+mutation path or establish bulk-edit worker readiness.
 
-## 1. Executive Summary & Verification Outcome
+**Production performance sign-off: NOT ESTABLISHED.** The query-plan test is a
+small-fixture smoke test. Its passing timings are not merchant-scale benchmarks.
 
-In accordance with **Phase 1, Step 4 — PostgreSQL Integration and End-to-End Verification**, all three Phase 1 filters, their Boolean composition, tenant/generation fencing, cursor pagination, and selection snapshot immutability were comprehensively verified against a live PostgreSQL 18 database using the repository's real Prisma migrations (`web/prisma/migrations/*`).
+## Evidence and scope
 
-No mock databases or simulated SQL dialects were used for this verification. The tests executed the full vertical runtime stack:
-1. AST normalization and allowlist validation (`web/fields/normalize.js`, `web/fields/operators.js`).
-2. Semantic validation and capability checking (`web/filters/validate.js`).
-3. Parameterized SQL compilation with same-variant correlation and soft-delete fencing (`web/filters/compile.js`).
-4. Read-only shop-isolated execution with signed keyset cursors (`web/filters/execute.js`).
-5. Transactional selection snapshot materialization, streaming SHA-256 membership hashing, and trigger-enforced drift prevention (`web/services/selection.server.js`).
+The source of truth is [phase1-postgres.test.js](../web/filters/integration/phase1-postgres.test.js).
+Its SHA-256 at review was
+`dc5e39f750e5599769bc4b1033913914faa7ac230b73213fd7a313086759a904`.
+The fixture matrix below describes the initial seed, before the selection test
+changes product 102's prices. Product and variant numbers abbreviate full
+`gid://shopify/Product/{number}` and `gid://shopify/ProductVariant/{number}` GIDs;
+query results use the separate internal PostgreSQL bigint product IDs.
 
-### Summary of Test Execution
-| Test Suite | Total Tests | Passed | Failed | Status |
-| :--- | :---: | :---: | :---: | :---: |
-| **Phase 1 PostgreSQL Integration** (`test:phase1:postgres`) | 21 | 21 | 0 | **PASS** |
-| **Existing PostgreSQL Filter Semantics** (`test:postgres`) | 20 | 20 | 0 | **PASS** |
-| **Filter Unit & Compiler Suite** (`test:filters`) | 212 | 212 | 0 | **PASS** |
-| **Full Web Core Suite** (`npm test --prefix web`) | 1,333 | 1,333 | 0 | **PASS** |
-| **Frontend Product Catalog Tests** (`test:products`) | 48 | 48 | 0 | **PASS** |
-| **Frontend UI Suite** (`test:ui`) | 35 | 35 | 0 | **PASS** |
+Reproduction after a clean backend dependency install:
 
----
-
-## 2. PostgreSQL Fixture Architecture
-
-The integration suite ([`web/filters/integration/phase1-postgres.test.js`](file:///d:/newmeta/web/filters/integration/phase1-postgres.test.js)) applied the repository's full Prisma migrations up to `20261101000800_complete_incremental_tenant_policies`. The fixture populates realistic multi-tenant data adhering strictly to the PostgreSQL schema triggers and constraints:
-
-- **Generation State Machine:** Generations are seeded starting in `INGESTING`, advance through `RECONCILING` and `VERIFIED`, and finalize in `PUBLISHED` (enforced by `mirror.guard_generation_status`).
-- **Generation Immutability:** Published catalog generations are strictly immutable (enforced by `mirror.guard_generation_data`).
-- **Tenant Scope:** Two independent tenants:
-  - **Shop A:** `shop-a.myshopify.com` (with `gen-published` and `gen-retired`).
-  - **Shop B:** `shop-b.myshopify.com` (with `gen-b-published`).
-
-### Fixture Product & Variant Matrix (Shop A Published Generation)
-| Product Shopify GID | Product Title | Variant Shopify GID | Price | Compare-At Price | Soft-Deleted? | Expected Match Characteristics |
-| :--- | :--- | :--- | :---: | :---: | :---: | :--- |
-| `gid://shopify/Product/101` | Equal Price Item | `gid://.../1011` | 20.00 | 20.00 | No | Matches `price = compareAtPrice` |
-| `gid://shopify/Product/102` | Discounted Item | `gid://.../1021` | 19.99 | 29.99 | No | Matches `price < compareAtPrice` |
-| `gid://shopify/Product/103` | Null Compare Item | `gid://.../1031` | 15.00 | NULL | No | Matches `compareAtPrice IS NULL` |
-| `gid://shopify/Product/104` | Marked-up Item | `gid://.../1041` | 50.00 | 40.00 | No | Matches `price > compareAtPrice` |
-| `gid://shopify/Product/105` | Zero Compare Item | `gid://.../1051` | 25.00 | 0.00 | No | Matches `price > compareAtPrice` (numeric comparison) |
-| `gid://shopify/Product/106` | Multi-Variant Mixed | `gid://.../1061`<br>`gid://.../1062` | 10.00<br>30.00 | NULL<br>25.00 | No<br>No | Matches `compareAtPrice IS NULL` (v1) and `price > compareAtPrice` (v2) |
-| `gid://shopify/Product/107` | Deleted Variant Item | `gid://.../1071` | 10.00 | NULL | **Yes** (`deleted_at` set) | Must **NOT** match `compareAtPrice IS NULL` (excluded by soft-delete filter) |
-| `gid://shopify/Product/108` | No Qualifying Item | `gid://.../1081` | 100.00 | 50.00 | No | Control item (does not match equal, lower, or null) |
-| `gid://shopify/Product/109` | Retired Gen Item | `gid://.../1091` | 10.00 | 20.00 | No | Belongs to `gen-retired` (must never be returned) |
-| `gid://shopify/Product/201` | Foreign Shop Item | `gid://.../2011` | 5.00 | 10.00 | No | Belongs to Shop B (must never be returned to Shop A) |
-
----
-
-## 3. Filter-by-Filter Verification Results
-
-### Filter 1: Specific Products (`product.id IN [...]`)
-- **Exact Matching:** Requesting `["gid://shopify/Product/101", "gid://shopify/Product/102"]` returned exactly products 101 and 102.
-- **Deduplication:** Duplicated GIDs in the input array were deduplicated during AST normalization; returned only unique matching products.
-- **Empty Array Rejection:** Input `value: []` failed closed with `FieldError: INVALID_VALUE` during normalization/validation.
-- **Foreign-Shop GID Isolation:** Specifying `gid://shopify/Product/201` (Shop B) under Shop A authentication returned zero rows.
-- **Maximum Item Budget:** Exceeding 100 items (101 items) was rejected immediately by the AST validator.
-
-### Filter 2: Compare-at Price is Blank (`variant.compareAtPrice IS NULL`)
-- **SQL NULL Match:** Correctly matched Product 103 (compare-at price is `NULL`) and Product 106 (variant 1 compare-at price is `NULL`).
-- **Zero Distinction:** Product 105 (`compare_at_price = '0.00'`) was NOT matched; confirmed three-valued SQL logic does not conflate `0.00` with `NULL`.
-- **Soft-Delete Exclusion:** Product 107 (variant has `compare_at_price IS NULL`, but `deleted_at IS NOT NULL`) was excluded by the correlated predicate `"v"."deleted_at" IS NULL`.
-
-### Filter 3: Price vs Compare-at Price (`variant.price` vs `variant.compareAtPrice`)
-- **Less Than (`lt`):** Correctly matched Product 102 (`19.99 < 29.99`). Decimal precision was strictly respected (no JavaScript IEEE 754 precision issues).
-- **Equal (`eq`):** Correctly matched Product 101 (`20.00 = 20.00`).
-- **Greater Than (`gt`):** Correctly matched Product 104 (`50.00 > 40.00`) and Product 105 (`25.00 > 0.00`).
-- **NULL Operand Exclusion:** Products with NULL `compare_at_price` (e.g. Product 103) evaluate to SQL `UNKNOWN` under `<` / `=` / `>`, and are correctly excluded by the PostgreSQL `WHERE` clause.
-- **Allowlist Enforcement:** Attempts to compare arbitrary fields or cross-resource fields failed closed at the normalization boundary.
-
----
-
-## 4. Boolean Semantics & Ambiguity Fencing
-
-All Boolean expressions and structural groupings were verified against PostgreSQL:
-1. **Positive Conjunction (`AND`):**
-   - Combining a product-level condition (`product.title eq "Discounted Item"`) and variant comparison (`variant.price lt variant.compareAtPrice`) succeeded and returned only Product 102.
-2. **Same-Variant Correlation Flattening:**
-   - Multiple variant conditions on the same conjunction flattened into a single correlated `EXISTS` subquery:
-     ```sql
-     EXISTS (
-       SELECT 1 FROM "mirror"."variants" AS "v" 
-       WHERE "v"."shop_id" = $1 
-         AND "v"."generation_id" = $2 
-         AND "v"."product_id" = "p"."id" 
-         AND "v"."deleted_at" IS NULL 
-         AND ("v"."price" < "v"."compare_at_price") 
-         AND ("v"."price" > $3::numeric)
-     )
-     ```
-   - Confirmed that conditions are evaluated against the *same physical variant row*.
-3. **Disjunction (`OR`):**
-   - Disjunction between product-level fields (`product.title eq "Equal Price Item" OR product.title eq "Discounted Item"`) compiled and executed cleanly, returning both products.
-4. **Mixed Product and Variant Disjunction Fails Closed:**
-   - Grouping `{ kind: "group", operator: "OR", children: [ { field: "product.title", ... }, { field: "variant.price", ... } ] }` failed closed with `UNSUPPORTED_OPERATION` ("Mixed product and variant conditions cannot be combined with OR").
-5. **Variant Condition Inside `NOT` Fails Closed:**
-   - Grouping `{ kind: "group", operator: "NOT", children: [ { field: "variant.price", ... } ] }` failed closed with `UNSUPPORTED_OPERATION` ("Variant conditions cannot be negated with NOT").
-
----
-
-## 5. Tenant and Catalog Generation Isolation
-
-The generated SQL queries enforce strict tenant and generation barriers:
-- **Shop Fencing:** An identical filter executed with Shop A authentication returned only Shop A records; executed with Shop B authentication, it returned only Shop B records.
-- **Generation Fencing:** Seeding an identical matching product (`Product 109`) into retired generation `gen-retired` confirmed that queries pinned to `gen-published` never observe or return retired generation rows.
-
----
-
-## 6. Keyset Pagination & Cursor Integrity
-
-- The compiled query enforces keyset ordering:
-  ```sql
-  ORDER BY "p"."id" ASC LIMIT $pageSize + 1
-  ```
-- **Page 1:** Retrieved 2 items (`pageSize: 2`). `hasMore: true`, returned HMAC-signed opaque cursor.
-- **Page 2:** Decoded signed cursor, executed continuation query:
-  ```sql
-  WHERE ... AND ("p"."id" > $cursorId::bigint) ORDER BY "p"."id" ASC LIMIT 3
-  ```
-  Retrieved remaining products with `hasMore: false`.
-- **Drift Protection:** Cursors signed for `gen-retired` or another shop are rejected immediately by `cursorService.verify`.
-
----
-
-## 7. Preview-to-Bulk-Edit Selection Consistency
-
-The lifecycle from filter preview to durable bulk edit was verified using `selectionService.createSelection` in `ALL_MATCHING` mode:
-1. **Materialization:** Executed the filter query across all pages, resolving matching product IDs and inserting them into `mirror.selection_items`.
-2. **Snapshot Creation:** Created an approved selection snapshot in `mirror.selection_snapshots` with status `APPROVED`.
-3. **Streaming Hash:** Streamed canonical product IDs in numeric BigInt order and computed a SHA-256 selection hash (`selectionHash`).
-4. **Post-Preview Catalog Drift Immunity:**
-   - Catalog data was modified after snapshot approval (a variant price in `mirror.variants` was altered).
-   - The approved selection snapshot in `mirror.selection_snapshots` remained completely unchanged (`selectedCount`, `selectionHash`, and `status`).
-   - Querying `mirror.selection_items` for the snapshot ID returned the exact original frozen set of products.
-5. **Database Trigger Enforcement:**
-   - Attempting to delete from `mirror.selection_items` for an approved snapshot was rejected with PostgreSQL exception `23514` (`Selection is frozen`, raised by `mirror.guard_selection_item`).
-   - Attempting to alter `filter_ast` on `mirror.selection_snapshots` was rejected with PostgreSQL exception `23514` (`Approved contract or selection is immutable`, raised by `mirror.guard_selection_approval`).
-
----
-
-## 8. Query Performance & EXPLAIN (ANALYZE, BUFFERS)
-
-Each Phase 1 filter query was evaluated using `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` on the PostgreSQL 18 container with realistic catalog tables:
-
-```
-                                                                QUERY PLAN
--------------------------------------------------------------------------------------------------------------------------------------------
-Limit  (cost=0.00..0.35 rows=1 width=8) (actual time=0.015..0.024 rows=3 loops=1)
-  Buffers: shared hit=18
-  ->  Seq Scan on products p  (cost=0.00..35.25 rows=100 width=8) (actual time=0.014..0.022 rows=3 loops=1)
-        Filter: ((shop_id = 'shop-a.myshopify.com'::text) AND (generation_id = 'gen-published'::text) AND (SubPlan 1))
-        Buffers: shared hit=18
-        SubPlan 1
-          ->  Seq Scan on variants v  (cost=0.00..1.08 rows=1 width=0) (actual time=0.002..0.002 rows=1 loops=3)
-                Filter: ((deleted_at IS NULL) AND (price < compare_at_price) AND (shop_id = 'shop-a.myshopify.com'::text) AND (generation_id = 'gen-published'::text) AND (product_id = p.id))
-                Buffers: shared hit=3
-Planning Time: 0.112 ms
-Execution Time: 0.114 ms
+```powershell
+npm run setup:tests
+npm run test:phase1:postgres
+npm run test:filters
 ```
 
-### Execution Metrics Matrix
-| Filter Query | Plan Root Node | Planning Time | Execution Time | Shared Hit Blocks | Memory / Disk Spills | Status |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Specific Products** (`product.id IN [...]`) | `Limit` | 0.771 ms | **0.031 ms** | 2 | None (0) | **PASS (< 50ms)** |
-| **Compare-at Price is Blank** (`variant.compareAtPrice IS NULL`) | `Limit` | 0.308 ms | **0.104 ms** | 18 | None (0) | **PASS (< 50ms)** |
-| **Price < Compare-at Price** (Same-Row Column Comparison) | `Limit` | 0.112 ms | **0.114 ms** | 18 | None (0) | **PASS (< 50ms)** |
-| **Product AND Variant Conjunction** | `Limit` | 0.125 ms | **0.065 ms** | 4 | None (0) | **PASS (< 50ms)** |
+| Suite | Passed / total | Failed / skipped | Recorded duration | Evidence |
+| --- | --- | --- | --- | --- |
+| Phase 1 PostgreSQL | 21 / 21 | 0 / 0 | 1,955.4996 ms | [PostgreSQL log](../.audit/dependency-phase1-postgres-20261101.log) |
+| Filter unit/compiler | 212 / 212 | 0 / 0 | 1,553.4841 ms | [Filter log](../.audit/dependency-filter-tests-20261101.log) |
 
-**Observations:**
-- Every query executes in **under 0.15 ms**, well inside the 50 ms budget limit.
-- All buffer accesses hit memory cache (`shared hit blocks <= 18`), zero disk reads or temporary buffer spills.
-- Subquery correlation cleanly terminates on the first qualifying variant (`SELECT 1 ... LIMIT 1` equivalent in `EXISTS`).
+These are recorded runs, not timing guarantees. The earlier report's broader
+1,669-test aggregate is not used as current sign-off evidence here. This report
+does not claim that all backend, schema, frontend, or concurrency suites passed.
 
----
+## Fixture setup and its limits
 
-## 9. Complete Regression Test Suite Status
+The setup applies every numeric-prefixed migration directory in sorted order,
+including `20261101000800_complete_incremental_tenant_policies` at review time.
+It runs migration SQL directly; it does not exercise Prisma's deployment ledger.
+It creates these tenant/generation pairs:
 
-Every test suite in the project was executed and verified:
+| Shop | Generation | Initial query scope |
+| --- | --- | --- |
+| `shop-a.myshopify.com` | `gen-published` | Shop A's published catalog |
+| `shop-a.myshopify.com` | `gen-retired` | Excluded from the published generation |
+| `shop-b.myshopify.com` | `gen-b-published` | Shop B only |
 
-1. **Phase 1 PostgreSQL Suite:**
-   ```bash
-   npm run test:phase1:postgres --prefix web
-   # 21 tests, 9 suites, 21 passed, 0 failed (1,692 ms)
-   ```
-2. **Existing PostgreSQL Integration Suite:**
-   ```bash
-   npm run test:postgres --prefix web
-   # 20 tests, 1 suite, 20 passed, 0 failed (1,479 ms)
-   ```
-3. **Filter Unit & Compiler Suite:**
-   ```bash
-   npm run test:filters --prefix web
-   # 212 tests, 5 suites, 212 passed, 0 failed (1,173 ms)
-   ```
-4. **Full Web Core Suite:**
-   ```bash
-   npm test --prefix web
-   # 1,333 tests, 22 suites, 1,333 passed, 0 failed (8,077 ms)
-   ```
-5. **Frontend Products Catalog Suite:**
-   ```bash
-   npm run test:products --prefix web/frontend
-   # 48 tests, 48 passed, 0 failed (2,183 ms)
-   ```
-6. **Frontend UI Suite:**
-   ```bash
-   npm run test:ui --prefix web/frontend
-   # 35 tests, 35 passed, 0 failed (1,167 ms)
-   ```
+The helper stages generations through INGESTING, RECONCILING, VERIFIED, and
+PUBLISHED, then RETIRED where requested. It inserts fixture ingestion and
+coverage records with fixed counts of 10 for both datasets. These counts are
+not measurements of actual imported JSONL rows. It temporarily disables
+`guard_sync_retention` and the variants' `guard_generation_data` trigger during
+setup, restoring both in `finally`. Consequently this fixture does not certify
+production ingestion completeness or all publication lifecycle preconditions.
 
-**Total Tests Verified Across Repositories:** **1,669 tests, 0 failures.**
+The suite uses the disposable database administrator pool and explicit test
+shop/authorization providers, including an `authorizeAccess` provider returning
+true. Tenant query predicates and runtime validation are exercised; independent
+Shopify authentication and restricted-login RLS enforcement are not established
+by this suite alone.
 
----
+## Exact initial product and variant matrix
 
-## 10. Architectural Guarantees & Invariants Maintained
+All products below are seeded ACTIVE. The first eight products belong to Shop A,
+`gen-published`; controls 109 and 201 have separate scopes shown below.
 
-1. **No Raw SQL or User Identifier Injection:** Column names and SQL operators are exclusively derived from `physicalSchema.fieldMappings` and internal server constants. User input is strictly passed via parameterized `$1, $2, ...` SQL values.
-2. **No Second Filter Engine:** The implementation extended the existing AST version 1 compiler, validator, and normalizer without introducing competing filter formats.
-3. **Fail-Closed by Design:** Ambiguous cross-resource `OR` expressions and `NOT` on variant predicates remain strictly rejected (`UNSUPPORTED_OPERATION`).
-4. **Exact Numeric Decimals:** Comparison between variant price and compare-at price occurs at the database column level (`"v"."price" < "v"."compare_at_price"`), preserving complete numeric precision without JavaScript floating point errors.
-5. **Soft-Delete Invariant:** All variant predicates enforce `"v"."deleted_at" IS NULL`, ensuring soft-deleted rows never satisfy customer targeting.
-6. **Selection Immutability:** Bulk operations snapshotting in `ALL_MATCHING` mode materializes records into `mirror.selection_items` protected by database triggers against post-preview catalog drift.
+| Product | Exact title | Variant | Price | Compare-at price | Variant soft-deleted? |
+| --- | --- | --- | --- | --- | --- |
+| 101 | Equal Price Item | 1011 | 25.00 | 25.00 | No |
+| 102 | Discounted Item | 1021 | 19.99 | 29.99 | No; SKU `DISC-1021` |
+| 102 | Discounted Item | 1022 | 45.00 | 50.00 | No |
+| 103 | Marked Up Item | 1031 | 35.00 | 20.00 | No |
+| 104 | Blank Compare At Item | 1041 | 15.00 | NULL | No |
+| 104 | Blank Compare At Item | 1042 | 18.00 | 25.00 | No |
+| 105 | Zero Compare At Item | 1051 | 10.00 | 0.00 | No |
+| 106 | Soft Deleted Variants Item | 1061 | 12.00 | 20.00 | Yes |
+| 106 | Soft Deleted Variants Item | 1062 | 20.00 | 20.00 | No |
+| 106 | Soft Deleted Variants Item | 1063 | 10.00 | NULL | Yes |
+| 107 | No Variants Item | None | — | — | — |
+| 108 | Mixed Multi Variant Item | 1081 | 50.00 | 40.00 | No |
+| 108 | Mixed Multi Variant Item | 1082 | 30.00 | 35.00 | No |
+| 109 | Retired Gen Item | 1091 | 10.00 | 20.00 | No; Shop A, `gen-retired` |
+| 201 | Foreign Shop Item | 2011 | 5.00 | 10.00 | No; Shop B, `gen-b-published` |
+
+## Filter outcomes and assertion coverage
+
+For Shop A's published generation, the initial fixture implies these result sets:
+
+| Filter | Matching product numbers | Reason |
+| --- | --- | --- |
+| `product.id IN [101, 102]` | 101, 102 | Exact GID matching |
+| `variant.compareAtPrice IS NULL` | 104 | Active variant 1041; deleted 1063 is excluded |
+| `variant.price < variant.compareAtPrice` | 102, 104, 108 | Variants 1021/1022, 1042, and 1082 |
+| `variant.price = variant.compareAtPrice` | 101, 106 | Variants 1011 and active 1062 |
+| `variant.price > variant.compareAtPrice` | 103, 105, 108 | Variants 1031, 1051, and 1081 |
+
+The price-comparison tests assert expected inclusions and selected exclusions,
+not exact equality of every complete result set. The table describes
+fixture-derived sets; it must not be read as stronger assertions than the source.
+Zero compare-at price on 105 is distinct from NULL; variant 1041 contributes no
+match to ordinary price comparisons because its comparison evaluates UNKNOWN.
+Products without variants cannot satisfy a variant EXISTS predicate.
+
+The specific-products tests additionally assert deduplication, empty-array
+rejection (`INVALID_VALUE`), foreign-shop product 201 returning an empty result,
+and rejection of an oversized 101-GID array against the 100-item limit.
+
+## Boolean composition and scope
+
+- Product 101/102 ID membership AND `price < compareAtPrice` returns exactly 102.
+- `price < compareAtPrice` AND `variant.sku = 'DISC-1021'` returns exactly 102;
+  the generated SQL contains exactly one EXISTS. The previous report's additional
+  price-threshold example was not this test's predicate.
+- Product title equality for Equal Price Item OR Discounted Item returns 101/102.
+- Mixed product/variant OR and variant predicates inside NOT are rejected with
+  `UNSUPPORTED_OPERATION`.
+- Shop A's price-lower query excludes foreign product 201 and retired product 109.
+  A separate Shop B compiler/executor returns exactly product 201.
+
+## Pagination and frozen selection
+
+The pagination test uses **pageSize 1**, verifies one row and a continuation
+cursor on page 1, then verifies one different row on page 2. It rejects a tampered
+cursor with `INVALID_VALUE`. It does not consume the third discounted product or
+assert terminal `hasMore: false`; cross-shop/generation cursor replay rejection
+is not asserted by this Phase 1 test.
+
+The selection test creates an ALL_MATCHING snapshot and checks APPROVED status,
+shop, generation, a present selection hash, and a selected count of at least two.
+It reads stored membership and checks its length against the count. To simulate
+catalog drift it disables `guard_generation_data`, sets **all** product 102
+variant prices to 999.00, and restores the trigger. It then checks the snapshot's
+status, hash, and count stayed unchanged. Direct deletion of selection items and
+mutation of the approved filter AST each fail with SQLSTATE 23514.
+
+It does not reread and compare the complete member-ID list after drift. Its
+cleanup sets **both** product 102 variants to 19.99, rather than restoring
+variant 1022's initial 45.00. Performance measurements therefore run after this
+fixture mutation. The test bypass is confined to disposable PostgreSQL and does
+not describe permitted production mirror writes.
+
+## Bulk-edit execution is outside this suite
+
+The snapshot test calls `selectionService.createSelection` and queries the stored
+selection. It never creates a mutation execution contract through the approval
+service, dispatches a durable job command, invokes `createOperationWorker`, or
+sends a Shopify mutation. The snapshot's `APPROVED` status is not evidence that
+the mutation approval, worker authority, or remote write path was exercised.
+
+| Boundary | Evidence in this Phase 1 snapshot test |
+| --- | --- |
+| Filter evaluation to persisted selection | Exercised through ALL_MATCHING selection creation |
+| Snapshot status, count, hash, and immutability checks | Exercised as described above |
+| Exact frozen membership consumed by the execution worker | Not exercised |
+| Mutation contract approval and durable command dispatch | Not exercised |
+| Worker lease, current authorization, installation and publication fences | Not exercised |
+| Shopify mutation payload, response, and remote outcome verification | Not exercised |
+| Mirror/history completion and uncertain-response recovery | Not exercised |
+
+Complete-path sign-off requires a separate integration scenario that starts with
+the real approved selection, approves the immutable mutation execution contract,
+dispatches its durable command, and runs the actual worker with the intended
+restricted database profiles. A controlled Shopify transport must capture the
+mutation payload so the test can compare its exact targets with the frozen
+selection, including exclusions and tenant/generation coordinates. It must also
+verify durable completion and reject revoked authority, stale publication or
+installation, and uncertain responses without issuing duplicate writes.
+
+Such a controlled-transport test would establish integration through the worker's
+Shopify boundary, not prove acceptance by the live Shopify API. Any live-store
+mutation verification needs separately identified evidence. Existing worker tests
+under `web/edit-history/integration/worker-execution.js` are separate coverage;
+their presence and the 21 Phase 1 passes do not establish that this complete
+filter-to-mutation scenario has run successfully.
+
+## Small-fixture query-plan smoke test
+
+Shop A's queried published generation has **8 products and 12 variant rows**,
+including two soft-deleted variants. The database also contains one retired
+product/variant and one product/variant for Shop B: **10 products and 14 variants
+in total**. Only four query shapes are measured, each once with `pageSize: 50`,
+after earlier tests have accessed and mutated this fixture.
+
+The test logs JSON summaries from `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` and
+asserts PostgreSQL's reported execution time for each statement is below 50 ms.
+This is a test-local smoke threshold, not a production service-level objective.
+It does not time the complete authenticated HTTP request, field/schema/coverage
+verification, pool acquisition, application processing, or network transfer.
+The following values come from the linked
+reproduction log; no full textual plan is claimed as captured evidence.
+
+| Query | Planning ms | Execution ms | Root | Shared hit blocks | Actual rows |
+| --- | --- | --- | --- | --- | --- |
+| Specific products 101/102 | 0.693 | 0.032 | Limit | 2 | 2 |
+| Compare-at price is blank | 0.290 | 0.221 | Limit | 18 | 1 |
+| Price < compare-at price | 0.126 | 0.100 | Limit | 18 | 3 |
+| Product AND variant conjunction | 0.137 | 0.071 | Limit | 4 | 0 |
+
+The measured conjunction selects product **101**, whose equal price does not
+satisfy `<`; its zero rows are expected. It differs from the earlier functional
+AND test selecting 101/102, which returns product 102. The small fixture and
+logged summary do not establish production-scale performance, mandatory index
+usage, zero disk spills, or a concurrency guarantee.
+
+## Merchant-scale performance evidence still required
+
+No merchant-scale benchmark or load test is included in the recorded evidence.
+The following is a required validation plan, not a report of completed work:
+
+| Dimension | Evidence to collect before production performance sign-off |
+| --- | --- |
+| Scale and distribution | Deterministically seeded, realistic product/variant ratios, skewed variant fan-out, NULL and zero values, soft deletions, and several tenants. Proposed tiers: 10,000, 100,000, and 1,000,000 products; the largest tier must cover or exceed the intended supported merchant size. Record actual row counts and seed/version. |
+| Query selectivity | Specific-ID inputs up to the allowed maximum; rare, common, and zero-match NULL/price comparisons; supported product/variant conjunctions. Include first and deep cursor pages and full all-matching selection materialization, with known correct results. |
+| Actual application path | Measure the authenticated request through live authorization, registry/schema/coverage checks, the compiler-issued executor, and the intended restricted database profiles. Separate SQL time from complete request and selection-job duration. |
+| Database environment | Record PostgreSQL version, migrations, indexes, statistics/ANALYZE state, compute, storage, memory/work_mem, pool sizes, dataset footprint, and network location. Use a production-representative environment; local Docker alone cannot certify hosted latency. |
+| Cache and repetition | Record warm-up policy and repeated measurements for each scenario. Separate warm-cache runs from explicitly documented cold-cache conditions; do not describe a fresh connection as a cold database cache. |
+| Concurrency and contention | Exercise several merchants and simultaneous requests under the expected load, plus ingestion, reconciliation, publication replacement, and selection jobs. Measure pool wait, locks, timeouts, retries, cancellation, and throughput without weakening snapshot or tenant fences. |
+| Measurements | Save latency distributions (including p50/p95/p99 and sample counts), throughput, errors, CPU/memory, and complete EXPLAIN JSON plans with actual/estimated rows, loops, buffer reads/hits, temporary I/O, and sort/hash spills. Assess plan choices against selectivity rather than requiring an index scan for every query. |
+| Acceptance and reproducibility | Establish supported scale, request/selection latency budgets, concurrency, throughput, and allowable resource/error limits before running. Publish commands, fixture parameters, environment configuration, raw artifacts and per-scenario results against those agreed budgets. |
+
+The Phase 1 smoke test remains useful for correctness and obvious local query
+regressions. It must not be used to infer percentile latency, sustained load
+capacity, production index behavior, or approval to support an unmeasured
+merchant catalog size. Production performance sign-off remains open until the
+separate workload above has been executed and its acceptance criteria met.

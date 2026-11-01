@@ -6,14 +6,15 @@ import {build} from 'esbuild';
 import {JSDOM} from 'jsdom';
 import React,{act} from 'react';
 import {createRoot} from 'react-dom/client';
+import {MemoryRouter} from 'react-router-dom';
 import useSyncProgress from '../hooks/useSyncProgress.js';
 
-const compiled=await build({stdin:{contents:"export {SyncProgressNotice} from './components/layout/SyncNotification.jsx';",
-  resolveDir:fileURLToPath(new URL('../',import.meta.url)),loader:'jsx'},bundle:true,write:false,format:'esm',jsx:'automatic',external:['react','react/jsx-runtime']});
+const compiled=await build({stdin:{contents:"export {SyncProgressNotice, default as SyncNotification} from './components/layout/SyncNotification.jsx'; export {SyncProgressProvider} from './hooks/SyncProgressContext.js'; export {default as ProductsSyncProgress} from './components/products/ProductsSyncProgress.jsx'; export {default as ProductsPage} from './pages/ProductsPage.jsx';",
+  resolveDir:fileURLToPath(new URL('../',import.meta.url)),loader:'jsx'},bundle:true,write:false,format:'esm',jsx:'automatic',loader:{'.css':'empty'},external:['react','react/jsx-runtime','react-router-dom']});
 const entry=new URL(`./.sync-notice-${process.pid}.mjs`,import.meta.url);
 await writeFile(entry,compiled.outputFiles[0].text);
-let SyncProgressNotice;
-try{({SyncProgressNotice}=await import(entry.href));}finally{await unlink(entry);}
+let SyncProgressNotice,SyncNotification,SyncProgressProvider,ProductsSyncProgress,ProductsPage;
+try{({SyncProgressNotice,SyncNotification,SyncProgressProvider,ProductsSyncProgress,ProductsPage}=await import(entry.href));}finally{await unlink(entry);}
 const originalFetch=globalThis.fetch;
 let dom,root,calls,latest,visibility;
 const job=(status='RUNNING',percent=50,id='run-one')=>({id,status,phase:'INGESTING',progress:{percent,estimated:percent!==100,stage:status==='SUCCEEDED'?'Your catalog mirror is ready':'Saving products and variants',processedLines:'50',expectedLines:'100'}});
@@ -72,4 +73,61 @@ test('old completed runs do not reappear on page load; review is clearly flagged
   assert.equal(document.querySelector('aside'),null);
   await act(async()=>root.render(React.createElement(SyncProgressNotice,{job:{...job(),reviewRequired:true}})));
   assert.match(document.body.textContent,/Sync needs attention/);
+});
+
+test('product page and popup share one poller and render actual increasing product counts through completion',async t=>{
+  calls=[];
+  await act(async()=>root.render(React.createElement(SyncProgressProvider,null,
+    React.createElement(ProductsSyncProgress),React.createElement(SyncNotification))));
+  assert.equal(calls.length,1);
+  await respond(0,{...job(),progress:{...job().progress,productsSaved:'100'}});
+  assert.match(document.body.textContent,/100/);
+  assert.match(document.body.textContent,/products saved to this sync/);
+  assert.equal(document.querySelector('progress').value,50);
+  await act(async()=>t.mock.timers.tick(3000));assert.equal(calls.length,2);
+  await respond(1,{...job('RUNNING',55),progress:{...job('RUNNING',55).progress,productsSaved:'125'}});
+  assert.match(document.body.textContent,/125/);assert.equal(document.querySelector('progress').value,55);
+  await act(async()=>t.mock.timers.tick(3000));await respond(2,null,503);
+  assert.match(document.body.textContent,/125/);assert.match(document.body.textContent,/last confirmed count/);
+  assert.equal(document.querySelector('.products-sync__track--active'),null);
+  await act(async()=>t.mock.timers.tick(6000));
+  await respond(3,{...job('SUCCEEDED',100),progress:{...job('SUCCEEDED',100).progress,productsSaved:'130'}});
+  assert.match(document.body.textContent,/130/);assert.match(document.body.textContent,/up to date/);
+  assert.equal(document.querySelector('progress').value,100);
+});
+
+test('missing product counts never masquerade as exported record counts',async()=>{
+  calls=[];await act(async()=>root.render(React.createElement(SyncProgressProvider,null,React.createElement(ProductsSyncProgress))));
+  await respond(0,job());assert.match(document.body.textContent,/Waiting for a saved product count/);
+  assert.doesNotMatch(document.body.textContent,/50 products/);
+});
+
+test('invalid product count responses preserve the last confirmed count',async t=>{
+ await respond(0,{...job(),progress:{...job().progress,productsSaved:'125'}});
+ await act(async()=>t.mock.timers.tick(3000));
+ await respond(1,{...job(),progress:{...job().progress,productsSaved:'200 products'}});
+ assert.equal(latest.error,true);assert.equal(latest.job.progress.productsSaved,'125');
+});
+
+test('revoked permission clears counts and stops polling rather than retaining a stale authorization',async t=>{
+  await respond(0,{...job(),progress:{...job().progress,productsSaved:'123'}});
+  await act(async()=>t.mock.timers.tick(3000));await respond(1,null,403);
+  assert.equal(latest.job,null);assert.equal(latest.lastUpdatedAt,null);
+  await act(async()=>t.mock.timers.tick(60000));assert.equal(calls.length,2);
+});
+
+test('publishing an observed sync refreshes the Products page immediately and only once',async t=>{
+ calls=[];
+ await act(async()=>root.render(React.createElement(SyncProgressProvider,null,React.createElement(MemoryRouter,null,React.createElement(ProductsPage)))));
+ const catalogCalls=()=>calls.filter(c=>c.url.startsWith('/api/mirror/products'));
+ const syncCalls=()=>calls.filter(c=>c.url==='/api/mirror/sync');
+ assert.equal(catalogCalls().length,1);assert.equal(syncCalls().length,1);
+ await act(async()=>catalogCalls()[0].resolve({ok:true,status:200,json:async()=>({snapshotId:null,publishedRevision:null,syncStatus:'PENDING',products:[],summary:{productCount:0,variantCount:0,activeCount:0},filteredCount:0,pageInfo:{hasNextPage:false,endCursor:null}})}));
+ await act(async()=>syncCalls()[0].resolve({ok:true,json:async()=>({data:job()})}));
+ await act(async()=>t.mock.timers.tick(3000));
+ await act(async()=>syncCalls()[1].resolve({ok:true,json:async()=>({data:job('SUCCEEDED',100)})}));
+ assert.equal(catalogCalls().length,2,'completion must not wait for the normal catalog poll');
+ await act(async()=>t.mock.timers.tick(15000));
+ await act(async()=>syncCalls()[2].resolve({ok:true,json:async()=>({data:job('SUCCEEDED',100)})}));
+ assert.equal(catalogCalls().length,2,'repeated completed status must not trigger duplicate reloads');
 });

@@ -44,7 +44,7 @@ test("import HTTP failures use stable types and codes in both authentication and
 
 function serviceFixture({ stored, queryError } = {}) {
   return createCatalogImportService({
-    database: { async connect() { assert.fail("Unexpected transaction"); },
+    database: { async connect() { if(queryError)throw queryError; return {async query(){return {rows:[]};},release(){}}; },
       async query() { if (queryError) throw queryError; return { rows: [] }; } },
     shopify: { config: { sessionStorage: { async loadSession() { return stored; } } } },
   });

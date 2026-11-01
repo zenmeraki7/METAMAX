@@ -66,6 +66,24 @@ license is retained in `web/TEMPLATE-LICENSE.md`.
 
 ## Checks
 
+The backend is a separate npm package in `web/`. Installing only the root
+package does not install `pg`, `express`, or the backend test dependencies.
+From the repository root, bootstrap and run the filter checks with:
+
+```powershell
+npm run setup:tests
+npm run test:filters
+npm run test:phase1:postgres
+```
+
+`setup:tests` uses the backend lockfile and includes development dependencies.
+The PostgreSQL command requires a running Docker engine (or the existing
+`FILTER_POSTGRES_BIN` configuration) and creates a disposable local database.
+Independent Node test files that import backend dependencies should live under
+`web/` so Node resolves that package's dependencies. For a script outside that
+directory, use `createRequire` anchored to `web/package.json` instead of assuming
+root-level dependency resolution. CI already runs `npm ci` inside `web/`.
+
 ```powershell
 npm test
 npm --prefix web/frontend run test:ui

@@ -2,6 +2,7 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { lazy, Suspense } from "react";
 import AppNavigation from "./components/layout/AppNavigation.jsx";
 import SyncNotification from "./components/layout/SyncNotification.jsx";
+import {SyncProgressProvider} from "./hooks/SyncProgressContext.js";
 import PageErrorBoundary from "./components/layout/PageErrorBoundary.jsx";
 const HomePage = lazy(() => import("./pages/HomePage.jsx"));
 const ProductsPage = lazy(() => import("./pages/ProductsPage.jsx"));
@@ -32,6 +33,7 @@ export default function App() {
   return (
     <>
       <BrowserRouter>
+        <SyncProgressProvider>
         <AppNavigation />
         <SyncNotification />
 
@@ -77,6 +79,7 @@ export default function App() {
             </Suspense>
           </PageErrorBoundary>
         </s-query-container>
+        </SyncProgressProvider>
       </BrowserRouter>
     </>
   );

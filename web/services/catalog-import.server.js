@@ -33,7 +33,9 @@ const progressJoins = `LEFT JOIN mirror.catalog_import_executions e ON e.id=j.id
   LEFT JOIN mirror.ingestion_runs r ON r.id=j.run_id AND r.shop_id=j.shop_id AND r.generation_id=j.generation_id
   LEFT JOIN mirror.generations g ON g.id=j.generation_id AND g.shop_id=j.shop_id`;
 const progressColumns = `j.*,e.phase,e.attempt AS execution_attempt,e.next_eligible_at AS execution_retry_at,
-  e.outcome_uncertain,e.review_required,r.processed_lines::text,r.expected_lines::text,g.status AS generation_status`;
+  e.outcome_uncertain,e.review_required,r.processed_lines::text,r.expected_lines::text,g.status AS generation_status,
+  CASE WHEN g.id IS NULL THEN NULL ELSE (SELECT count(*)::text FROM mirror.products p
+    WHERE p.shop_id=j.shop_id AND p.generation_id=j.generation_id AND p.deleted_at IS NULL) END AS products_saved`;
 
 export function createCatalogImportService({ database, shopify, fetchImpl = fetch, logger = console,
   phaseRuntime,
@@ -48,6 +50,23 @@ export function createCatalogImportService({ database, shopify, fetchImpl = fetc
     const stored = await shopify.config.sessionStorage.loadSession(session.id);
     if (stored?.id !== session.id) throw new CatalogImportError(C.UNAUTHENTICATED);
     return requireImportSession(stored, session.shop);
+  }
+  // Read-only progress snapshot; transaction-local tenant scope is necessary
+  // for the restricted catalog login's product RLS. No publication/write lock.
+  async function readProgress(sql, values, shopId) {
+    const client = await database.connect();
+    let discard;
+    try {
+      await client.query('BEGIN READ ONLY');
+      await client.query("SET LOCAL statement_timeout='5000ms'");
+      await client.query("SELECT set_config('app.shop_id',$1,true)", [shopId]);
+      const result = await client.query(sql, values);
+      await client.query('COMMIT');
+      return result;
+    } catch (error) {
+      try { await client.query('ROLLBACK'); } catch (rollbackError) { discard = rollbackError; }
+      throw error;
+    } finally { client.release(discard); }
   }
   async function owner(client, job) {
     const row = (await client.query(`SELECT j.* FROM mirror.catalog_import_jobs j
@@ -201,16 +220,16 @@ export function createCatalogImportService({ database, shopify, fetchImpl = fetc
     async status(session, id) {
       const stored = await authenticate(session);
       requireCatalogImportId(id);
-      const result=publicJob((await database.query(`SELECT ${progressColumns} FROM mirror.catalog_import_jobs j ${progressJoins}
-        WHERE j.shop_id=$1 AND j.id=$2`, [stored.shop,id])).rows[0]);
+      const result=publicJob((await readProgress(`SELECT ${progressColumns} FROM mirror.catalog_import_jobs j ${progressJoins}
+        WHERE j.shop_id=$1 AND j.id=$2`, [stored.shop,id], stored.shop)).rows[0]);
       await authenticate(session);return result;
     },
     async current(session) {
       const stored = await authenticate(session);
-      const read = () => database.query(`SELECT ${progressColumns} FROM mirror.catalog_import_jobs j
+      const read = () => readProgress(`SELECT ${progressColumns} FROM mirror.catalog_import_jobs j
         JOIN mirror.shops s ON s.id=j.shop_id AND s.installation_version=j.installation_version AND s.uninstalled_at IS NULL
         ${progressJoins} WHERE j.shop_id=$1
-        ORDER BY (j.status IN ('QUEUED','RUNNING','RETRY')) DESC,j.created_at DESC,j.id DESC LIMIT 1`, [stored.shop]);
+        ORDER BY (j.status IN ('QUEUED','RUNNING','RETRY')) DESC,j.created_at DESC,j.id DESC LIMIT 1`, [stored.shop], stored.shop);
       let row = (await read()).rows[0];
       if (!row) {
         await service.ensureInitialSync(session);

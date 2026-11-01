@@ -1,9 +1,12 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {useSharedSyncProgress} from "../hooks/SyncProgressContext.js";
+import {syncActive} from "../hooks/useSyncProgress.js";
 import useProductCapabilities from '../hooks/useProductCapabilities.js';
 import { useSearchParams } from "react-router-dom";
 import ProductsInsights from "../components/products/ProductsInsights.jsx";
 import ProductsToolbar from "../components/products/ProductsToolbar.jsx";
 import ProductsTable from "../components/products/ProductsTable.jsx";
+import ProductsSyncProgress from "../components/products/ProductsSyncProgress.jsx";
 import useProductCatalog from "../hooks/useProductCatalog.js";
 import useProductSelection from "../hooks/useProductSelection.js";
 import { productColumns } from "../data/products.columns.js";
@@ -13,6 +16,16 @@ const EMPTY_PRODUCTS = [];
 export default function ProductsPage() {
   const [params] = useSearchParams();
   const catalog = useProductCatalog(params.get("search") ?? "");
+  const {job:syncJob} = useSharedSyncProgress();
+  const observedSync = useRef(null);
+  useEffect(() => {
+    if (!syncJob) return;
+    if (syncActive(syncJob)) observedSync.current = syncJob.id;
+    else if (syncJob.id && observedSync.current === syncJob.id && syncJob.status === "SUCCEEDED" && syncJob.progress.percent === 100) {
+      observedSync.current = null;
+      catalog.reload();
+    }
+  }, [syncJob, catalog.reload]);
   const capabilities=useProductCapabilities(catalog.data?.snapshotId,catalog.data?.publishedRevision,catalog.error);
   const products = catalog.data?.products ?? EMPTY_PRODUCTS;
   const selection = useProductSelection(products);
@@ -94,29 +107,22 @@ export default function ProductsPage() {
       <s-link slot="breadcrumb-actions" href="/">
         Home
       </s-link>
-      <s-stack gap="base">
+      <s-stack gap="small">
+        <ProductsInsights summary={hasCatalog ? catalog.data.summary : null} />
+        <ProductsSyncProgress />
         {catalog.error && (
-          <s-stack
-            class="products-notice products-notice--error"
-            role="alert"
-            gap="base"
-          >
+          <s-banner heading="We couldn’t load your products" tone="critical" role="alert">
             <s-text>{catalog.error}</s-text>
             <s-button onClick={catalog.reload} disabled={catalog.loading}>
               Try again
             </s-button>
-          </s-stack>
+          </s-banner>
         )}
         {notice && (
-          <s-stack
-            class={`products-notice${notice.failed ? " products-notice--error" : ""}`}
-            role="status"
-            gap="base"
-          >
+          <s-banner heading={notice.failed ? "Catalog needs attention" : "Getting your catalog ready"} tone={notice.failed ? "warning" : "info"}>
             {notice.message}
-          </s-stack>
+          </s-banner>
         )}
-        <ProductsInsights summary={hasCatalog ? catalog.data.summary : null} />
         <ProductsToolbar
           capabilities={capabilities}
           search={catalog.search}
