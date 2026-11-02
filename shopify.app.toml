@@ -1,6 +1,6 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
-client_id = "deac399342968b0b07e7f1defb7c7fd7"
+client_id = "f21082724c64c7ebdf0bb2c4172db2b0"
 name = "metamax"
 application_url = "https://shopify.dev/apps/default-app-home"
 embedded = true
