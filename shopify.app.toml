@@ -1,6 +1,6 @@
 # Shopify CLI configuration
 client_id = "f21082724c64c7ebdf0bb2c4172db2b0"
-application_url = "https://shopify.dev/apps/default-app-home"
+application_url = "https://metamax-1.onrender.com"
 embedded = true
 name = "METAMAX"
 
@@ -8,7 +8,7 @@ name = "METAMAX"
 scopes = "read_products,write_products,read_inventory,write_inventory"
 
 [auth]
-redirect_urls = ["https://shopify.dev/apps/default-app-home/api/auth/callback"]
+redirect_urls = ["https://metamax-1.onrender.com/api/auth/callback"]
 
 [webhooks]
 api_version = "2026-10"
@@ -37,4 +37,4 @@ compliance_topics = ["customers/data_request", "customers/redact", "shop/redact"
 uri = "/api/webhooks"
 
 [build]
-automatically_update_urls_on_dev = true
+automatically_update_urls_on_dev = false
